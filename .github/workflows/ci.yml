@@ -28,6 +28,7 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
           cache: npm
+      - uses: oven-sh/setup-bun@v2
       - run: npm ci
       - run: npm run check
       - run: npm run pack:check
@@ -37,7 +38,7 @@ jobs:
 
   report-dispatched-results:
     name: Report dispatched CI results
-    if: ${{ github.event_name == 'workflow_dispatch' && always() }}
+    if: ${{ github.event_name == 'workflow_dispatch' && github.repository_owner == 'zacbemis' && always() }}
     needs: check
     runs-on: ubuntu-latest
     timeout-minutes: 5

@@ -93,6 +93,32 @@ Verified against a live Antigravity ACP session on omp 18.8.9:
   dependency, not a port regression; the same modules load and run correctly
   under omp's own Bun-based extension loader.
 
+## Testing and CI (fork)
+
+- `npm run check` (tsc + vitest) runs under Node against the published
+  `@oh-my-pi/*` type surfaces. Five suites (`provider`, `models`, `runtime`,
+  `runtime-safety`, `pi-events`) import host packages whose entries are raw
+  TypeScript that touches the `Bun` global; Node cannot execute them, so
+  `vitest.config.ts` excludes them from the Node run (they still type-check).
+  Run them with a real Bun runtime when needed: `bun test test/<file>` — note
+  that Bun's own runner is missing a few vitest APIs in some other suites
+  (`toHaveBeenCalledExactlyOnceWith`, `vi.waitFor`, fake-timer semantics);
+  those are runner limitations, not failures of this package.
+- `npm run test:packed` packs the package, installs it (production deps) into
+  a temp directory, and loads the packed extension in the real omp CLI via
+  `omp models antigravity-acp --no-extensions --json -e …`, expecting the four
+  antigravity models to register. The smoke reads the JSON listing and then
+  kills the CLI: provider discovery may leave network connections open, so the
+  process is not expected to self-exit.
+- `typebox` ships as a regular dependency (upstream keeps it peer-only): omp's
+  npm-CLI form does not resolve bare `typebox` for transitive extension
+  imports, so packaged/plugin installs must carry it.
+- CI (`.github/workflows/ci.yml`) runs `npm ci` → `npm run check` →
+  `npm run pack:check` → `npm run test:packed` → dependency audit on Node
+  22.19.0 and 24, with Bun installed (the omp CLI binary is a Bun script). The
+  upstream-only `report-dispatched-results` job is skipped outside the
+  `zacbemis` repository.
+
 ## License
 
 MIT — see [LICENSE](./LICENSE). Original work by
