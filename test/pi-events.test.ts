@@ -1,4 +1,4 @@
-import type { Api, Model } from "@earendil-works/pi-ai";
+import type { Api, Model } from "@oh-my-pi/pi-ai";
 import { describe, expect, it } from "vitest";
 
 import { PiEventWriter } from "../src/stream/pi-events.js";

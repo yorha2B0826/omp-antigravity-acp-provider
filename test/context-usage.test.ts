@@ -1,4 +1,4 @@
-import type { Context } from "@earendil-works/pi-ai";
+import type { Context } from "@oh-my-pi/pi-ai";
 import { describe, expect, it } from "vitest";
 
 import { buildPromptParts } from "../src/stream/context.js";

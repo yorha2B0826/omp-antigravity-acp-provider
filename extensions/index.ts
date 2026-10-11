@@ -1,7 +1,7 @@
 import type {
 	ExtensionAPI,
 	ExtensionCommandContext,
-} from "@earendil-works/pi-coding-agent";
+} from "@oh-my-pi/pi-coding-agent";
 import { Type } from "typebox";
 
 import { inspectAntigravityAuth } from "../src/acp/antigravity.js";
@@ -25,7 +25,7 @@ import {
 	ACP_SDK_VERSION,
 	PACKAGE_VERSION,
 } from "../src/constants.js";
-import { createAntigravityProvider } from "../src/provider.js";
+import { createAntigravityProvider, PROVIDER_ID } from "../src/provider.js";
 import {
 	AntigravityRuntime,
 	PERMISSION_RESULT_KIND,
@@ -37,7 +37,8 @@ import { runSetupWizard } from "../src/wizard.js";
 export default function antigravityAcpExtension(pi: ExtensionAPI): void {
 	const runtime = new AntigravityRuntime(undefined, loadConfig().permissions);
 	const { provider } = createAntigravityProvider(runtime);
-	pi.registerProvider(provider);
+	// omp exposes only the declarative overload: registerProvider(name, config).
+	pi.registerProvider(PROVIDER_ID, provider);
 
 	pi.registerTool({
 		name: PERMISSION_TOOL_NAME,
@@ -197,9 +198,12 @@ export default function antigravityAcpExtension(pi: ExtensionAPI): void {
 		},
 	};
 	pi.registerCommand("antigravity-acp", commandDefinition);
-	pi.registerCommand("gemini-acp", {
-		...commandDefinition,
-		description: "Deprecated alias for /antigravity-acp",
+	pi.registerCommand("antigravity-acp-reload", {
+		description: "Reload the Antigravity ACP provider (re-register provider, models, and tool)",
+		handler: async (_args, ctx) => {
+			pi.registerProvider(PROVIDER_ID, provider);
+			ctx.ui.notify("Antigravity ACP provider reloaded.", "info");
+		},
 	});
 
 	pi.on("session_start", async (_event, ctx) => {

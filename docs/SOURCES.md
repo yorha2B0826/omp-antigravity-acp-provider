@@ -6,7 +6,7 @@ Research performed **2026-09-04**. Source links are primary where possible. Loca
 
 | Component | Baseline inspected |
 |---|---|
-| Pi coding agent | `@earendil-works/pi-coding-agent` 0.85.0 |
+| Pi coding agent | `@oh-my-pi/pi-coding-agent` 0.85.0 |
 | Gemini CLI npm stable | `@google/gemini-cli` 0.58.0; Node `>=20`; package-only npm unpacked size 97,987,180 bytes (not total transitive install) |
 | Gemini CLI source | commit [`85aca163`](https://github.com/google-gemini/gemini-cli/commit/85aca163f6c73ac6ce380b5447359146b8adcae4) (main/nightly source observed as 0.60.0-nightly) |
 | ACP SDK source/latest npm observed | 1.4.0; source commit [`5e2cfcab`](https://github.com/agentclientprotocol/typescript-sdk/commit/5e2cfcabb5303dc93c093da788b68460b9958526) |
@@ -31,13 +31,13 @@ Local baseline:
 
 ```text
 ~/.nvm/versions/node/v24.19.0/lib/node_modules/
-  @earendil-works/pi-coding-agent/docs/custom-provider.md
-  @earendil-works/pi-coding-agent/docs/extensions.md
-  @earendil-works/pi-coding-agent/docs/models.md
-  @earendil-works/pi-coding-agent/docs/packages.md
-  @earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai/dist/models.d.ts
-  @earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai/dist/types.d.ts
-  @earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai/dist/auth/types.d.ts
+  @oh-my-pi/pi-coding-agent/docs/custom-provider.md
+  @oh-my-pi/pi-coding-agent/docs/extensions.md
+  @oh-my-pi/pi-coding-agent/docs/models.md
+  @oh-my-pi/pi-coding-agent/docs/packages.md
+  @oh-my-pi/pi-coding-agent/node_modules/@oh-my-pi/pi-ai/dist/models.d.ts
+  @oh-my-pi/pi-coding-agent/node_modules/@oh-my-pi/pi-ai/dist/types.d.ts
+  @oh-my-pi/pi-coding-agent/node_modules/@oh-my-pi/pi-ai/dist/auth/types.d.ts
 ```
 
 Key observations: complete Provider API; dynamic model refresh publication; `/login` auth interaction; `SimpleStreamOptions.sessionId`; strict assistant event lifecycle; `pi-package` gallery keyword and `pi.extensions`; Pi core packages as peers.

@@ -1,4 +1,4 @@
-import { normalizeContext } from "@earendil-works/pi-ai";
+import { normalizeContext } from "../src/omp/transcript.js";
 import { fileURLToPath } from "node:url";
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";

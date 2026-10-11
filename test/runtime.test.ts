@@ -1,4 +1,5 @@
-import { normalizeContext, type Context, type Model } from "@earendil-works/pi-ai";
+import type { Context, Model } from "@oh-my-pi/pi-ai";
+import { normalizeContext } from "../src/omp/transcript.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";

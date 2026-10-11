@@ -1,16 +1,21 @@
 import {
-	type Api,
 	type AssistantMessage,
 	type AssistantMessageEventStream,
 	createAssistantMessageEventStream,
-	type Model,
 	type StopReason,
 	type ToolCall,
-} from "@earendil-works/pi-ai";
+} from "@oh-my-pi/pi-ai";
 
 import { AntigravityAcpError, errorMessage } from "../acp/errors.js";
 import { isJsonObject } from "./json.js";
 import { emptyUsage } from "./usage.js";
+
+/** Minimal model identity the writer stamps onto the assistant message. */
+interface EventWriterModel {
+	api: string;
+	provider: string;
+	id: string;
+}
 
 export class PiEventWriter {
 	readonly stream: AssistantMessageEventStream;
@@ -23,7 +28,7 @@ export class PiEventWriter {
 		return this.terminal;
 	}
 
-	constructor(model: Model<Api>) {
+	constructor(model: EventWriterModel) {
 		this.stream = createAssistantMessageEventStream();
 		this.message = {
 			role: "assistant",

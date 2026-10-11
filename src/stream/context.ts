@@ -1,5 +1,6 @@
 import type { ContentBlock } from "@agentclientprotocol/sdk";
-import { getCurrentSystemPrompt, type Context, type Message } from "@earendil-works/pi-ai";
+import type { Context, Message } from "@oh-my-pi/pi-ai";
+import { getCurrentSystemPrompt } from "../omp/transcript.js";
 
 import { AntigravityAcpError } from "../acp/errors.js";
 
@@ -8,7 +9,16 @@ const MAX_INSTRUCTION_BYTES = 256 * 1024;
 
 /** Instructions are never silently truncated or counted as consumed by a tool continuation. */
 export function currentSystemInstructions(context: Context): string {
-	const prompt = getCurrentSystemPrompt(context.messages) || context.systemPrompt || "";
+	// omp splits the system prompt into an array of segments; upstream Pi passes a
+	// single string. Replay any transcript system messages first, then fall back to
+	// whichever shape the host supplied.
+	const rawSystemPrompt = context.systemPrompt as unknown;
+	const fallback = Array.isArray(rawSystemPrompt)
+		? rawSystemPrompt.join("\n\n")
+		: typeof rawSystemPrompt === "string"
+			? rawSystemPrompt
+			: "";
+	const prompt = getCurrentSystemPrompt(context.messages) || fallback;
 	if (Buffer.byteLength(prompt, "utf8") > MAX_INSTRUCTION_BYTES) {
 		throw new AntigravityAcpError("invalid_input", `Pi system instructions exceed ${MAX_INSTRUCTION_BYTES} bytes; reduce them rather than truncating instructions`);
 	}

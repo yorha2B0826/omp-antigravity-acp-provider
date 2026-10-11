@@ -1,4 +1,4 @@
-import type { Tool } from "@earendil-works/pi-ai";
+import type { Tool } from "@oh-my-pi/pi-ai";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { Type } from "typebox";

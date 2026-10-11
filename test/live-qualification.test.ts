@@ -1,4 +1,4 @@
-import type { Tool } from "@earendil-works/pi-ai";
+import type { Tool } from "@oh-my-pi/pi-ai";
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 

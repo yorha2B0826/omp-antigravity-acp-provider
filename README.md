@@ -4,6 +4,13 @@ A first-class [Pi](https://github.com/earendil-works/pi) provider for **Google A
 
 > **Important:** this package no longer uses `@google/gemini-cli`. The Gemini CLI individual Code Assist login path was retired and is not a supported authentication route. Antigravity/`agy` is the target runtime.
 
+> **omp port (this branch).** This branch retargets the provider from upstream Pi
+> (`@earendil-works/*`) to **Oh My Pi / omp** (`@oh-my-pi/*`, omp 18.8.x). The ACP
+> backend is unchanged; only the host-adapter layer was ported. See
+> [`docs/OMP-PORT.md`](./docs/OMP-PORT.md) for what changed and how to install it
+> as an omp extension. The `pi` manifest key is retained so upstream Pi keeps
+> working.
+
 ## Features
 
 - Registers `antigravity-acp/*` models backed by Google Antigravity.

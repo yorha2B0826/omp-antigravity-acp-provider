@@ -5,16 +5,17 @@ import type {
 	RequestPermissionResponse,
 	SessionNotification,
 } from "@agentclientprotocol/sdk";
+import type {
+	Context,
+	SimpleStreamOptions,
+	ToolResultMessage,
+} from "@oh-my-pi/pi-ai";
 import {
 	collapseSystemMessages,
 	getCurrentSystemPrompt,
 	getCurrentTools,
 	normalizeContext,
-	type Context,
-	type Model,
-	type SimpleStreamOptions,
-	type ToolResultMessage,
-} from "@earendil-works/pi-ai";
+} from "./omp/transcript.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { createHash } from "node:crypto";
 
@@ -44,7 +45,7 @@ import {
 	type PiToolInvocation,
 } from "./mcp/bridge.js";
 import type { PermissionMode } from "./config.js";
-import { resolveAcpModelId } from "./models.js";
+import { resolveAcpModelId, type AcpModel } from "./models.js";
 import { type PromptParts, buildPromptParts, currentSystemInstructions } from "./stream/context.js";
 import { PiEventWriter } from "./stream/pi-events.js";
 import { usageFromPrompt } from "./stream/usage.js";
@@ -53,7 +54,7 @@ import { RuntimeMetrics } from "./status.js";
 const PERMISSION_TIMEOUT_MS = 120_000;
 const TOOL_BATCH_MS = 100;
 
-type AntigravityModel = Model<"antigravity-acp">;
+type AntigravityModel = AcpModel;
 
 interface PendingPermission {
 	id: string;

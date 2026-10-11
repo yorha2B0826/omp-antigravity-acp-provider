@@ -1,4 +1,4 @@
-import type { ExtensionUIContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionUIContext } from "@oh-my-pi/pi-coding-agent";
 
 import { inspectAntigravityAuth } from "./acp/antigravity.js";
 import { ensureAntigravityAcpReady, inspectRuntimeSetup } from "./acp/setup.js";

@@ -1,4 +1,4 @@
-import type { JsonObject, JsonValue } from "@earendil-works/pi-ai";
+import type { JsonObject, JsonValue } from "@oh-my-pi/pi-ai";
 
 /** Only parsed JSON is valid Pi tool input; reject lossy/non-serializable values. */
 export function isJsonObject(value: unknown): value is JsonObject {

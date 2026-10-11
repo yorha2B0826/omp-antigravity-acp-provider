@@ -1,18 +1,36 @@
 import type { AcpModelInfo } from "./acp/session-state.js";
-import type {
-	Model,
-	ThinkingLevel,
-	ThinkingLevelMap,
-} from "@earendil-works/pi-ai";
 
 export const PROVIDER_ID = "antigravity-acp";
 export const API_ID = "antigravity-acp";
+
+/**
+ * ACP model descriptor. Locally declared instead of importing the host pi-ai
+ * `Model` type: omp's `Model` requires a resolved `identity`/`compat` record
+ * that only its `buildModel` can materialize, so the provider layer carries
+ * the minimum fields its own consumers reach for.
+ */
+export interface AcpModel {
+	id: string;
+	name: string;
+	api: string;
+	provider: string;
+	baseUrl: string;
+	reasoning: boolean;
+	/** omp-facing thinking capability so Shift+Tab exposes the tiers. */
+	thinking?: { mode: string; efforts: readonly string[]; defaultLevel?: string };
+	/** effort tier -> exact Antigravity ACP model id (null = unsupported). */
+	thinkingLevelMap?: Readonly<Partial<Record<string, string | null>>>;
+	input: readonly string[];
+	cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
+	contextWindow: number;
+	maxTokens: number;
+}
 
 const ZERO_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } as const;
 type Effort = "low" | "medium" | "high";
 type Variants = Partial<Record<Effort, string>>;
 
-export const FALLBACK_MODELS: readonly Model<typeof API_ID>[] = [
+export const FALLBACK_MODELS: readonly AcpModel[] = [
 	reasoningModel("gemini-3.8-flash", "Gemini 3.8 Flash", {
 		low: "gemini-3.8-flash-low",
 		medium: "gemini-3.8-flash-medium",
@@ -37,7 +55,7 @@ export const FALLBACK_MODELS: readonly Model<typeof API_ID>[] = [
 /** Collapse Antigravity's effort-qualified ACP IDs into one Pi model. The
  * exact server IDs live in thinkingLevelMap, allowing Shift+Tab to select the
  * corresponding low/medium/high variant without cluttering /model. */
-export function projectModels(models: readonly AcpModelInfo[]): Model<typeof API_ID>[] {
+export function projectModels(models: readonly AcpModelInfo[]): AcpModel[] {
 	const safe = models.filter((candidate) => validModelId(candidate.modelId.trim()));
 	const groups = new Map<
 		string,
@@ -57,7 +75,7 @@ export function projectModels(models: readonly AcpModelInfo[]): Model<typeof API
 
 	const emittedGroups = new Set<string>();
 	const emittedIds = new Set<string>();
-	const projected: Model<typeof API_ID>[] = [];
+	const projected: AcpModel[] = [];
 	for (const candidate of safe) {
 		const id = candidate.modelId.trim();
 		if (emittedIds.has(id)) continue;
@@ -82,8 +100,8 @@ export function projectModels(models: readonly AcpModelInfo[]): Model<typeof API
 /** Resolve Pi's current reasoning level to the exact model ID advertised by
  * Antigravity. Unsupported programmatic levels clamp to the nearest tier. */
 export function resolveAcpModelId(
-	model: Model<typeof API_ID>,
-	reasoning: ThinkingLevel | undefined,
+	model: AcpModel,
+	reasoning: string | undefined,
 ): string {
 	const map = model.thinkingLevelMap;
 	if (!model.reasoning || !map) return model.id;
@@ -110,8 +128,8 @@ function reasoningModel(
 	id: string,
 	name: string,
 	variants: Variants,
-): Model<typeof API_ID> {
-	const thinkingLevelMap: ThinkingLevelMap = {
+): AcpModel {
+	const thinkingLevelMap: Record<string, string | null> = {
 		off: null,
 		minimal: null,
 		low: variants.low ?? null,
@@ -123,7 +141,7 @@ function reasoningModel(
 	return baseModel(id, name, true, thinkingLevelMap);
 }
 
-function fixedModel(id: string, name: string): Model<typeof API_ID> {
+function fixedModel(id: string, name: string): AcpModel {
 	return baseModel(id, name, false);
 }
 
@@ -131,8 +149,8 @@ function baseModel(
 	id: string,
 	name: string,
 	reasoning: boolean,
-	thinkingLevelMap?: ThinkingLevelMap,
-): Model<typeof API_ID> {
+	thinkingLevelMap?: Readonly<Record<string, string | null>>,
+): AcpModel {
 	return {
 		id,
 		name,
@@ -140,7 +158,16 @@ function baseModel(
 		provider: PROVIDER_ID,
 		baseUrl: "",
 		reasoning,
-		...(thinkingLevelMap ? { thinkingLevelMap } : {}),
+		...(thinkingLevelMap
+			? {
+					thinkingLevelMap,
+					thinking: {
+						mode: "effort",
+						efforts: ["low", "medium", "high"] as const,
+						defaultLevel: "medium",
+					},
+				}
+			: {}),
 		input: ["text", "image"],
 		cost: ZERO_COST,
 		contextWindow: 1_000_000,

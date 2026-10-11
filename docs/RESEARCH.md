@@ -31,8 +31,8 @@ Pi installs npm, git, URL, and local packages and loads extension paths from a `
   "keywords": ["pi-package", "pi-extension", "gemini", "acp"],
   "pi": { "extensions": ["./extensions/index.ts"] },
   "peerDependencies": {
-    "@earendil-works/pi-ai": "*",
-    "@earendil-works/pi-coding-agent": "*"
+    "@oh-my-pi/pi-ai": "*",
+    "@oh-my-pi/pi-coding-agent": "*"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "<tested exact/range>",

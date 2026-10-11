@@ -2,7 +2,7 @@
 
 ## Recommendation
 
-Build a focused Pi package that registers a complete `@earendil-works/pi-ai` `Provider` named `gemini-acp`, bundles a pinned `@google/gemini-cli`, and controls that CLI through stable ACP v1 over NDJSON stdio. Do not require a globally installed executable, patch Pi, proxy Gemini's private HTTP APIs, or turn the package into a general research/tool suite.
+Build a focused Pi package that registers a complete `@oh-my-pi/pi-ai` `Provider` named `gemini-acp`, bundles a pinned `@google/gemini-cli`, and controls that CLI through stable ACP v1 over NDJSON stdio. Do not require a globally installed executable, patch Pi, proxy Gemini's private HTTP APIs, or turn the package into a general research/tool suite.
 
 The core shape is:
 
