@@ -19,18 +19,43 @@
  * plain message arrays (upstream's own `TranscriptMessages` is `readonly {role}[]`).
  */
 
+import type { Message } from "@oh-my-pi/pi-ai";
+
 /** A message-like entry; replay helpers only read entries whose role is `"system"`. */
-interface TranscriptMessageLike {
+export interface TranscriptMessageLike {
 	role: string;
 	content?: unknown;
 	timestamp?: number;
 	sections?: Record<string, string | null> | undefined;
 	toolsAdded?: TranscriptToolLike[] | undefined;
 	toolsRemoved?: TranscriptToolReferenceLike[] | undefined;
+	/** Legacy `toolResult` fields: tolerated so omp messages stay structurally acceptable here. */
+	toolCallId?: string;
+	toolName?: string;
+	isError?: boolean;
+	details?: unknown;
 }
 
+/**
+ * A legacy system-state entry: upstream Pi carried the system prompt and tool
+ * state as `role: "system"` messages in the transcript. omp keeps that state in
+ * `Context.systemPrompt`/`Context.tools` instead, but the replay still folds it
+ * back into this entry shape, so the type has to describe it exactly.
+ */
+export interface SystemStateEntry {
+	role: "system";
+	content?: string | readonly { type: string; text?: string }[] | undefined;
+	sections?: Record<string, string | null> | undefined;
+	toolsAdded?: TranscriptToolLike[] | undefined;
+	toolsRemoved?: TranscriptToolReferenceLike[] | undefined;
+	timestamp?: number;
+}
+
+/** Entries the transcript carries: omp messages plus replayed system state. */
+export type TranscriptEntry = Message | SystemStateEntry;
+
 /** A tool-like declaration as carried by system-message tool state. */
-interface TranscriptToolLike {
+export interface TranscriptToolLike {
 	name: string;
 	description?: string;
 	parameters: unknown;
@@ -38,7 +63,7 @@ interface TranscriptToolLike {
 }
 
 /** Upstream `ToolReference`: a by-name removal marker. */
-interface TranscriptToolReferenceLike {
+export interface TranscriptToolReferenceLike {
 	name: string;
 }
 
@@ -78,21 +103,21 @@ function isSystemMessage(message: TranscriptMessageLike): boolean {
 
 /** Upstream `TranscriptContext`: a context whose system prompt and tools are folded into messages. */
 export interface TranscriptContext {
-	messages: TranscriptMessageLike[];
+	messages: TranscriptEntry[];
 }
 
 /** Build the leading system message for a prompt and tool set. Returns undefined when both are empty, so an empty transcript stays empty. */
 export function createInitialSystemMessage(
 	systemPrompt: string | undefined,
-	tools: TranscriptToolLike[] | undefined,
-): TranscriptMessageLike | undefined {
+	tools: readonly TranscriptToolLike[] | undefined,
+): SystemStateEntry | undefined {
 	const hasSystemPrompt = systemPrompt !== undefined && systemPrompt.length > 0;
 	const hasTools = tools !== undefined && tools.length > 0;
 	if (!hasSystemPrompt && !hasTools) return undefined;
 	return {
 		role: "system",
 		content: systemPrompt ?? "",
-		...(hasTools ? { toolsAdded: tools } : {}),
+		...(hasTools ? { toolsAdded: [...tools] } : {}),
 		timestamp: 0,
 	};
 }
@@ -104,11 +129,11 @@ export function createInitialSystemMessage(
  */
 export function normalizeContext(context: {
 	systemPrompt?: string | undefined;
-	tools?: TranscriptToolLike[] | undefined;
-	messages: TranscriptMessageLike[];
+	tools?: readonly TranscriptToolLike[] | undefined;
+	messages: readonly TranscriptEntry[];
 }): TranscriptContext {
 	const initialMessage = createInitialSystemMessage(context.systemPrompt, context.tools);
-	const messages = initialMessage ? [initialMessage, ...context.messages] : context.messages;
+	const messages = initialMessage ? [initialMessage, ...context.messages] : [...context.messages];
 	return { messages };
 }
 
@@ -139,7 +164,7 @@ export function getCurrentTools(messages: readonly TranscriptMessageLike[]): Tra
  * prompt and tools. Later `content` is appended to the base prompt, `sections` are
  * patched by name, and tools are resolved with {@link getCurrentTools}.
  */
-export function getCurrentSystemMessage(messages: readonly TranscriptMessageLike[]): TranscriptMessageLike | undefined {
+export function getCurrentSystemMessage(messages: readonly TranscriptMessageLike[]): SystemStateEntry | undefined {
 	const content: string[] = [];
 	const sections = new Map<string, string | null>();
 	let timestamp: number | undefined;

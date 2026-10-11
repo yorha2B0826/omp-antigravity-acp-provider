@@ -35,8 +35,10 @@ describe("projectModels", () => {
 	it("registers separate Google-account and API-key login methods", async () => {
 		const { provider, runtime } = createAntigravityProvider();
 		try {
-			expect(provider.auth.oauth?.loginLabel).toBe("Sign in with Google");
-			expect(provider.auth.apiKey?.name).toBe("Antigravity Gemini API key");
+			// omp keeps both login methods on the config itself: the OAuth entry
+			// (display name) and the `apiKey` env-var fallback.
+			expect(provider.oauth?.name).toBe("Google Antigravity (ACP)");
+			expect(provider.apiKey).toBe("GEMINI_API_KEY");
 		} finally {
 			await runtime.close();
 		}

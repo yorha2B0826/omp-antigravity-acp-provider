@@ -1,4 +1,4 @@
-import type { Tool } from "@oh-my-pi/pi-ai";
+import type { Tool, TSchema } from "@oh-my-pi/pi-ai";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { Type } from "typebox";
@@ -10,7 +10,10 @@ const tools: Tool[] = [
 	{
 		name: "echo",
 		description: "Echo text",
-		parameters: Type.Object({ text: Type.String() }),
+		// The legacy TypeBox builder result and omp's `TSchema` are different type
+		// systems; omp shims `typebox` onto its own schema facade at runtime, so
+		// this host boundary re-types the builder result exactly once.
+		parameters: Type.Object({ text: Type.String() }) as unknown as TSchema,
 	},
 ];
 

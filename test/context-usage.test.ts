@@ -1,13 +1,12 @@
-import type { Context } from "@oh-my-pi/pi-ai";
 import { describe, expect, it } from "vitest";
 
-import { buildPromptParts } from "../src/stream/context.js";
+import { type PromptContext, buildPromptParts } from "../src/stream/context.js";
 import { quotaFromPrompt } from "../src/status.js";
 import { usageFromPrompt } from "../src/stream/usage.js";
 
 describe("prompt context", () => {
 	it("reconstructs history only for a fresh binding", () => {
-		const context: Context = {
+		const context: PromptContext = {
 			systemPrompt: "Follow project rules",
 			messages: [
 				{ role: "user", content: "old", timestamp: 1 },
@@ -32,7 +31,7 @@ describe("prompt context", () => {
 	});
 
 	it("reconstructs trailing tool calls and results without replaying the old user prompt", () => {
-		const context: Context = {
+		const context: PromptContext = {
 			messages: [
 				{ role: "user", content: "inspect", timestamp: 1 },
 				{
@@ -65,7 +64,7 @@ describe("prompt context", () => {
 	});
 
 	it("replays transcript system sections separately from conversation history", () => {
-		const context: Context = {
+		const context: PromptContext = {
 			messages: [
 				{ role: "system", content: "Base instructions", sections: { rules: "Old rules", removed: "Obsolete" }, timestamp: 0 },
 				{ role: "user", content: "old", timestamp: 1 },
@@ -86,7 +85,7 @@ describe("prompt context", () => {
 	});
 
 	it("adds only unseen external deltas to a warm prompt", () => {
-		const context: Context = {
+		const context: PromptContext = {
 			messages: [
 				{ role: "user", content: "already owned", timestamp: 1 },
 				{ role: "user", content: "externally inserted", timestamp: 2 },
@@ -156,7 +155,8 @@ describe("usageFromPrompt", () => {
 			output: 8,
 			cacheRead: 5,
 			cacheWrite: 2,
-			reasoning: 3,
+			// omp's `Usage` names thinking tokens `reasoningTokens` (a subset of `output`).
+			reasoningTokens: 3,
 			totalTokens: 30,
 		});
 	});

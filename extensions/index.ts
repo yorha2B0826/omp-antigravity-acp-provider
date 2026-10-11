@@ -1,7 +1,12 @@
 import type {
 	ExtensionAPI,
 	ExtensionCommandContext,
+	ToolDefinition,
 } from "@oh-my-pi/pi-coding-agent";
+// Types only: omp re-targets the legacy `typebox` specifier onto its own schema
+// facade at runtime, so its `TObject`/`TString` describe the value this file
+// builds with TypeBox at compile time without touching the runtime import.
+import type { TObject, TString } from "@oh-my-pi/omptype/typebox";
 import { Type } from "typebox";
 
 import { inspectAntigravityAuth } from "../src/acp/antigravity.js";
@@ -34,17 +39,28 @@ import {
 } from "../src/runtime.js";
 import { runSetupWizard } from "../src/wizard.js";
 
+/** Parameters of the permission tool, as omp's schema facade describes them. */
+type PermissionToolParameters = TObject<{ requestId: TString }>;
+
 export default function antigravityAcpExtension(pi: ExtensionAPI): void {
 	const runtime = new AntigravityRuntime(undefined, loadConfig().permissions);
 	const { provider } = createAntigravityProvider(runtime);
 	// omp exposes only the declarative overload: registerProvider(name, config).
 	pi.registerProvider(PROVIDER_ID, provider);
 
-	pi.registerTool({
+	/**
+	 * Upstream Pi's `ToolDefinition` carried `executionMode`; omp schedules tool
+	 * calls itself and has no such field. The property is kept so the definition
+	 * object the host receives keeps its exact runtime shape.
+	 */
+	const permissionTool: ToolDefinition<PermissionToolParameters> & { executionMode: "sequential" } = {
 		name: PERMISSION_TOOL_NAME,
 		label: "Antigravity ACP Permission",
 		description: "Presents an Antigravity ACP permission request to the user. Only call IDs emitted by the provider are valid.",
-		parameters: Type.Object({ requestId: Type.String({ minLength: 1, maxLength: 128 }) }),
+		// The legacy TypeBox builder result and omp's `TSchema` are different type
+		// systems; the host boundary here is the single place both meet, so the
+		// schema is re-typed once to the shape omp actually validates at runtime.
+		parameters: Type.Object({ requestId: Type.String({ minLength: 1, maxLength: 128 }) }) as unknown as PermissionToolParameters,
 		executionMode: "sequential",
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const request = runtime.getPermission(params.requestId);
@@ -76,7 +92,8 @@ export default function antigravityAcpExtension(pi: ExtensionAPI): void {
 				details,
 			};
 		},
-	});
+	};
+	pi.registerTool(permissionTool);
 
 	const commandDefinition = {
 		description: "Set up, inspect, update, or configure Google Antigravity ACP",

@@ -1,3 +1,4 @@
+import type { StopReason as AcpStopReason } from "@agentclientprotocol/sdk";
 import {
 	type AssistantMessage,
 	type AssistantMessageEventStream,
@@ -17,9 +18,19 @@ interface EventWriterModel {
 	id: string;
 }
 
+/**
+ * The assistant message streamed by {@link PiEventWriter}. `rawStopReason`
+ * carries the raw ACP stop reason (`end_turn`, `max_tokens`, …) that the
+ * runtime stamps on once the ACP turn settles; omp's `AssistantMessage` has no
+ * slot for it.
+ */
+export interface PiEventMessage extends AssistantMessage {
+	rawStopReason?: AcpStopReason | undefined;
+}
+
 export class PiEventWriter {
 	readonly stream: AssistantMessageEventStream;
-	readonly message: AssistantMessage;
+	readonly message: PiEventMessage;
 	private open: { kind: "text" | "thinking"; index: number } | undefined;
 	private started = false;
 	private terminal = false;
@@ -37,7 +48,10 @@ export class PiEventWriter {
 			provider: model.provider,
 			model: model.id,
 			usage: emptyUsage(),
-			stopReason: "pending",
+			// A real `StopReason` placeholder, like every omp transport uses while
+			// a turn is still streaming; `done()`/`fail()` replace it before the
+			// message is ever terminal.
+			stopReason: "stop",
 			timestamp: Date.now(),
 		};
 	}

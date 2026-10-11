@@ -1,6 +1,6 @@
 import type {
+	Api,
 	AssistantMessageEventStream,
-	Context,
 	Model,
 	SimpleStreamOptions,
 } from "@oh-my-pi/pi-ai";
@@ -9,9 +9,31 @@ import type { ProviderConfig, ProviderModelConfig } from "@oh-my-pi/pi-coding-ag
 import { hasAntigravityAuth } from "./acp/antigravity.js";
 import { API_ID, FALLBACK_MODELS, PROVIDER_ID, projectModels, type AcpModel } from "./models.js";
 import { AntigravityRuntime, MANAGED_AUTH_MARKER } from "./runtime.js";
+import type { PromptContext } from "./stream/context.js";
+
+/**
+ * Upstream Pi carried the provider display name inside the config; omp takes it
+ * as the first `registerProvider` argument and ignores the field. The property
+ * is kept so the object handed to the host keeps its exact runtime shape.
+ */
+type LegacyNamedProviderConfig = ProviderConfig & { name: string };
+
+/**
+ * The provider config this bundle registers. `streamSimple` accepts a wider
+ * context than the host declares: alongside omp `Context`s it also serves the
+ * vendored legacy transcript context (see src/omp/transcript.ts), whose system
+ * state entries the host `Context` type cannot express.
+ */
+export type AntigravityProviderConfig = ProviderConfig & {
+	streamSimple?: (
+		model: Model<Api>,
+		context: PromptContext,
+		options?: SimpleStreamOptions,
+	) => AssistantMessageEventStream;
+};
 
 export interface AntigravityProviderBundle {
-	provider: ProviderConfig;
+	provider: AntigravityProviderConfig;
 	runtime: AntigravityRuntime;
 }
 
@@ -37,7 +59,7 @@ function toOmpModel(model: AcpModel): ProviderModelConfig {
 export function createAntigravityProvider(runtime = new AntigravityRuntime()): AntigravityProviderBundle {
 	let models: AcpModel[] = [...FALLBACK_MODELS];
 
-	const provider: ProviderConfig = {
+	const provider: LegacyNamedProviderConfig & AntigravityProviderConfig = {
 		name: "Google Antigravity (ACP)",
 		baseUrl: "https://daily-cloudcode-pa.googleapis.com",
 		api: API_ID,
@@ -77,14 +99,19 @@ export function createAntigravityProvider(runtime = new AntigravityRuntime()): A
 				return MANAGED_AUTH_MARKER;
 			},
 		},
+		// A wider `context` parameter than the host declares is intentional: the
+		// provider also serves the vendored legacy transcript context (see
+		// src/omp/transcript.ts), which the host `Context` cannot express.
 		streamSimple(
-			model: Model<"antigravity-acp">,
-			context: Context,
+			model: Model<Api>,
+			context: PromptContext,
 			options?: SimpleStreamOptions,
 		): AssistantMessageEventStream {
-			return runtime
-				.stream(model as never, context as never, options as SimpleStreamOptions | undefined)
-				.stream as AssistantMessageEventStream;
+			// omp routes only its own `antigravity-acp` catalog models here; the host
+			// `Model<Api>` additionally carries the `identity`/`compat` records that
+			// only omp's `buildModel` materializes and this runtime never reads, so
+			// the host model narrows to the ACP descriptor at this one boundary.
+			return runtime.stream(model as unknown as AcpModel, context, options ?? {}).stream;
 		},
 		models: models.map(toOmpModel),
 		async fetchDynamicModels(apiKey: string | undefined): Promise<readonly ProviderModelConfig[]> {

@@ -1,9 +1,9 @@
-import type { Api, Model } from "@oh-my-pi/pi-ai";
+import type { AcpModel } from "../src/models.js";
 import { describe, expect, it } from "vitest";
 
 import { PiEventWriter } from "../src/stream/pi-events.js";
 
-const model: Model<Api> = {
+const model: AcpModel = {
 	id: "test",
 	name: "Test",
 	api: "antigravity-acp",

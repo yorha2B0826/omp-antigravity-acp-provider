@@ -1,10 +1,11 @@
-import type { Context, Model } from "@oh-my-pi/pi-ai";
+import type { Context, TSchema, Tool } from "@oh-my-pi/pi-ai";
 import { normalizeContext } from "../src/omp/transcript.js";
+import type { AcpModel } from "../src/models.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { Type } from "typebox";
+import { Type, type TSchema as TypeBoxSchema } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AntigravityAcpConnection } from "../src/acp/connection.js";
 import { AcpSessionStore } from "../src/acp/session-store.js";
@@ -14,8 +15,17 @@ import type { PiEventWriter } from "../src/stream/pi-events.js";
 import { piToolFingerprint, PiMcpBridge } from "../src/mcp/bridge.js";
 
 const fakeAgent = fileURLToPath(new URL("./fixtures/fake-agent.mjs", import.meta.url));
-const model: Model<"antigravity-acp"> = { id: "gemini-test", name: "Test", api: "antigravity-acp", provider: "antigravity-acp", baseUrl: "", reasoning: false, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 1000000, maxTokens: 8192 };
-const tools = [{ name: "echo", description: "Echo", parameters: Type.Object({ text: Type.String() }) }];
+/**
+ * The legacy TypeBox builder result and omp's `TSchema` are different type
+ * systems; omp shims `typebox` onto its own schema facade at runtime, so the
+ * bridge boundary re-types the builder result exactly once.
+ */
+function ompSchema(schema: TypeBoxSchema): TSchema {
+	return schema as unknown as TSchema;
+}
+
+const model: AcpModel = { id: "gemini-test", name: "Test", api: "antigravity-acp", provider: "antigravity-acp", baseUrl: "", reasoning: false, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 1000000, maxTokens: 8192 };
+const tools: Tool[] = [{ name: "echo", description: "Echo", parameters: ompSchema(Type.Object({ text: Type.String() })) }];
 const roots: string[] = [];
 const runtimes: AntigravityRuntime[] = [];
 afterEach(async () => {
@@ -281,10 +291,10 @@ describe("tool projection diagnostics", () => {
 	});
 
 	it("names all capped tools, excludes the permission broker and fingerprints descriptions/omissions", () => {
-		const active = Array.from({ length: 67 }, (_, i) => ({ name: `t${i}`, description: "tool", parameters: Type.Object({}) }));
-		const bridge = new PiMcpBridge({ tools: [...active, { name: PERMISSION_TOOL_NAME, description: "broker", parameters: Type.Object({}) }], onCall: async () => ({ content: [] }) });
+		const active = Array.from({ length: 67 }, (_, i) => ({ name: `t${i}`, description: "tool", parameters: ompSchema(Type.Object({})) }));
+		const bridge = new PiMcpBridge({ tools: [...active, { name: PERMISSION_TOOL_NAME, description: "broker", parameters: ompSchema(Type.Object({})) }], onCall: async () => ({ content: [] }) });
 		expect(bridge.omissions.map((entry) => entry.name)).toEqual(["t64", "t65", "t66"]);
 		expect(piToolFingerprint(tools)).not.toBe(piToolFingerprint([{ ...tools[0]!, description: "changed" }]));
-		expect(piToolFingerprint(tools)).not.toBe(piToolFingerprint([...tools, { name: "bad", description: "bad", parameters: Type.String() }]));
+		expect(piToolFingerprint(tools)).not.toBe(piToolFingerprint([...tools, { name: "bad", description: "bad", parameters: ompSchema(Type.String()) }]));
 	});
 });

@@ -1,5 +1,6 @@
-import type { Context, Model } from "@oh-my-pi/pi-ai";
 import { normalizeContext } from "../src/omp/transcript.js";
+import type { AcpModel } from "../src/models.js";
+import type { PromptContext } from "../src/stream/context.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -16,7 +17,7 @@ import {
 } from "../src/runtime.js";
 
 const fakeAgent = fileURLToPath(new URL("./fixtures/fake-agent.mjs", import.meta.url));
-const model: Model<"antigravity-acp"> = {
+const model: AcpModel = {
 	id: "gemini-test",
 	name: "Gemini Test",
 	api: "antigravity-acp",
@@ -123,7 +124,7 @@ describe("AntigravityRuntime", () => {
 			(options) => new AntigravityAcpConnection({ ...options, command: process.execPath, args: [fakeAgent] }),
 		);
 		try {
-			const context: Context = {
+			const context: PromptContext = {
 				systemPrompt: "Be useful",
 				messages: [{ role: "user", content: "hello", timestamp: Date.now() }],
 			};
@@ -183,7 +184,7 @@ describe("AntigravityRuntime", () => {
 			new AntigravityAcpConnection({ ...options, command: process.execPath, args: [fakeAgent] });
 		const firstRuntime = new AntigravityRuntime(factory, "yolo", store);
 		try {
-			const firstContext: Context = {
+			const firstContext: PromptContext = {
 				messages: [{ role: "user", content: "first", timestamp: 1 }],
 			};
 			const first = firstRuntime.stream(model, firstContext, { sessionId: "persisted", apiKey: "test-key" });
@@ -281,7 +282,7 @@ describe("AntigravityRuntime", () => {
 			(options) => new AntigravityAcpConnection({ ...options, command: process.execPath, args: [fakeAgent] }),
 		);
 		try {
-			const firstContext: Context = {
+			const firstContext: PromptContext = {
 				messages: [{ role: "user", content: "request permission", timestamp: 1 }],
 			};
 			const firstWriter = runtime.stream(model, firstContext, {
@@ -304,7 +305,7 @@ describe("AntigravityRuntime", () => {
 			const request = runtime.getPermission(toolCall.id);
 			expect(request?.options.map((option) => option.kind)).toEqual(["allow_once", "reject_once"]);
 
-			const resumedContext: Context = {
+			const resumedContext: PromptContext = {
 				messages: [
 					...firstContext.messages,
 					firstMessage.message,
@@ -352,7 +353,7 @@ describe("AntigravityRuntime", () => {
 			const tools = [
 				{ name: "echo", description: "Echo text", parameters: Type.Object({ text: Type.String() }) },
 			];
-			const firstContext: Context = {
+			const firstContext: PromptContext = {
 				messages: [{ role: "user", content: "use bridge", timestamp: 1 }],
 				tools,
 			};
@@ -402,7 +403,7 @@ describe("AntigravityRuntime", () => {
 			const tools = [
 				{ name: "echo", description: "Echo text", parameters: Type.Object({ text: Type.String() }) },
 			];
-			const firstContext: Context = {
+			const firstContext: PromptContext = {
 				tools,
 				messages: [{ role: "user", content: `use bridge ${scenario}`, timestamp: 1 }],
 			};
@@ -449,7 +450,7 @@ describe("AntigravityRuntime", () => {
 			const tools = [
 				{ name: "echo", description: "Echo text", parameters: Type.Object({ text: Type.String() }) },
 			];
-			const firstContext: Context = {
+			const firstContext: PromptContext = {
 				tools,
 				messages: [{ role: "user", content: "use bridge delayed", timestamp: 1 }],
 			};

@@ -5,16 +5,20 @@ import type {
 	RequestPermissionResponse,
 	SessionNotification,
 } from "@agentclientprotocol/sdk";
-import type {
-	Context,
-	SimpleStreamOptions,
-	ToolResultMessage,
+import {
+	type Context,
+	type Message,
+	type SimpleStreamOptions,
+	type Tool,
+	type ToolResultMessage,
+	resolvedApiKeyBearer,
 } from "@oh-my-pi/pi-ai";
 import {
 	collapseSystemMessages,
 	getCurrentSystemPrompt,
 	getCurrentTools,
 	normalizeContext,
+	type TranscriptEntry,
 } from "./omp/transcript.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { createHash } from "node:crypto";
@@ -46,7 +50,12 @@ import {
 } from "./mcp/bridge.js";
 import type { PermissionMode } from "./config.js";
 import { resolveAcpModelId, type AcpModel } from "./models.js";
-import { type PromptParts, buildPromptParts, currentSystemInstructions } from "./stream/context.js";
+import {
+	type PromptContext,
+	type PromptParts,
+	buildPromptParts,
+	currentSystemInstructions,
+} from "./stream/context.js";
 import { PiEventWriter } from "./stream/pi-events.js";
 import { usageFromPrompt } from "./stream/usage.js";
 import { RuntimeMetrics } from "./status.js";
@@ -167,16 +176,28 @@ export class AntigravityRuntime {
 		this.sessionStore = sessionStore ?? (this.ensureAgent ? new AcpSessionStore() : undefined);
 	}
 
-	stream(model: AntigravityModel, context: Context, options: SimpleStreamOptions = {}): PiEventWriter {
+	stream(model: AntigravityModel, context: PromptContext, options: SimpleStreamOptions = {}): PiEventWriter {
 		const writer = new PiEventWriter(model);
 		// ACP has no mid-conversation system-message API. Replay Pi's prompt/tool
 		// deltas into a checkpoint; its fingerprint invalidates stale warm sessions.
 		try {
-			const transcript = collapseSystemMessages(normalizeContext(context));
+			const transcript = collapseSystemMessages(
+				normalizeContext({
+					systemPrompt: joinSystemPrompt(context.systemPrompt),
+					tools: context.tools,
+					messages: context.messages,
+				}),
+			);
 			const resolvedContext: Context = {
-				messages: transcript.messages,
-				systemPrompt: getCurrentSystemPrompt(transcript.messages),
-				tools: getCurrentTools(transcript.messages),
+				// The replayed checkpoint stays at the head of the message list (the
+				// transcript helpers and fingerprinting both understand a leading
+				// `role: "system"` entry, and dropping it would shift every message
+				// index). It is a legacy system-state entry, not an omp `Message`,
+				// so the list is asserted back to the omp-shaped type that the
+				// prompt pipeline consumes.
+				messages: transcript.messages as Message[],
+				systemPrompt: [getCurrentSystemPrompt(transcript.messages)],
+				tools: getCurrentTools(transcript.messages) as Tool[],
 			};
 			currentSystemInstructions(resolvedContext);
 			void this.runQueued(model, resolvedContext, options, writer).catch((error: unknown) => {
@@ -411,20 +432,24 @@ export class AntigravityRuntime {
 		if (this.ensureAgent) await ensureAntigravityAcpReady();
 		await this.modeChanges;
 		this.assertEpoch(epoch);
+		// omp resolves an `ApiKeyResolver` to a bearer before provider dispatch;
+		// a function here can only come from a non-conforming caller, for which
+		// the previous pass-through value was never usable as an ACP key either.
+		const apiKey = typeof options.apiKey === "function" ? undefined : resolvedApiKeyBearer(options.apiKey);
 		const persistent = Boolean(options.sessionId);
 		const key = options.sessionId
 			? `sid:${options.sessionId}`
 			: (this.findContinuationKey(context) ?? `ephemeral:${crypto.randomUUID()}`);
 		const tools = context.tools ?? [];
 		const acpModelId = resolveAcpModelId(model, options.reasoning);
-		let binding = await this.getBinding(key, model, acpModelId, options.apiKey, writer, tools, options.signal);
+		let binding = await this.getBinding(key, model, acpModelId, apiKey, writer, tools, options.signal);
 		await this.modeChanges;
 		this.assertEpoch(epoch);
 		// Check before continuation early returns as well as before fresh prompts.
 		if (binding.mode !== this.permissionMode || this.confirmedMode(binding) !== this.permissionMode ||
 			binding.toolFingerprint !== piToolFingerprint(tools)) {
 			await this.invalidateBinding(binding);
-			binding = await this.getBinding(key, model, acpModelId, options.apiKey, writer, tools, options.signal);
+			binding = await this.getBinding(key, model, acpModelId, apiKey, writer, tools, options.signal);
 		}
 
 		// A permission tool result resumes the still-running ACP prompt rather than
@@ -435,7 +460,7 @@ export class AntigravityRuntime {
 			if (!result) {
 				cancelPermission(binding);
 				await this.dropBinding(key, binding);
-				binding = await this.getBinding(key, model, acpModelId, options.apiKey, writer, tools, options.signal);
+				binding = await this.getBinding(key, model, acpModelId, apiKey, writer, tools, options.signal);
 			} else {
 				binding.writer = writer;
 				this.noteContinuationInstructions(binding, context);
@@ -465,7 +490,7 @@ export class AntigravityRuntime {
 			if (results.some((result) => result.message === undefined)) {
 				cancelPiTools(binding, "Pi continued without returning every requested tool result");
 				await this.dropBinding(key, binding);
-				binding = await this.getBinding(key, model, acpModelId, options.apiKey, writer, tools, options.signal);
+				binding = await this.getBinding(key, model, acpModelId, apiKey, writer, tools, options.signal);
 			} else {
 				binding.writer = writer;
 				this.noteContinuationInstructions(binding, context);
@@ -492,7 +517,7 @@ export class AntigravityRuntime {
 			await this.modeChanges;
 			this.assertEpoch(epoch);
 			// A queued caller may hold an obsolete binding after shutdown/mode changes.
-			binding = await this.getBinding(key, model, acpModelId, options.apiKey, writer, tools, options.signal);
+			binding = await this.getBinding(key, model, acpModelId, apiKey, writer, tools, options.signal);
 			if (
 				binding.needsReconstruction || binding.mode !== this.permissionMode ||
 				this.confirmedMode(binding) !== this.permissionMode ||
@@ -502,7 +527,7 @@ export class AntigravityRuntime {
 					binding.historyFingerprint
 			) {
 				await this.dropBinding(key, binding, true);
-				binding = await this.getBinding(key, model, acpModelId, options.apiKey, writer, tools, options.signal);
+				binding = await this.getBinding(key, model, acpModelId, apiKey, writer, tools, options.signal);
 			}
 			binding.writer = writer;
 			if (binding.modelId !== acpModelId) {
@@ -611,7 +636,7 @@ export class AntigravityRuntime {
 		}
 	}
 
-	private findContinuationKey(context: Context): string | undefined {
+	private findContinuationKey(context: PromptContext): string | undefined {
 		for (const binding of this.resolvedBindings) {
 			if (binding.permission && findPermissionResult(context, binding.permission.id)) return binding.key;
 			if (
@@ -876,7 +901,7 @@ export class AntigravityRuntime {
 		return sessionModes(binding.connection.getSessionState(binding.session.sessionId))?.currentModeId;
 	}
 
-	private noteContinuationInstructions(binding: Binding, context: Context): void {
+	private noteContinuationInstructions(binding: Binding, context: PromptContext): void {
 		if (binding.instructionsFingerprint !== instructionFingerprint(context)) {
 			// ACP has no system-update RPC. Finish this immutable prompt, then rebuild;
 			// do not persist a fingerprint claiming the new instructions reached ACP.
@@ -906,6 +931,15 @@ export class AntigravityRuntime {
 	private assertActive(): void {
 		if (this.disposed) throw new AntigravityAcpError("process_exit", "Antigravity ACP runtime is closed");
 	}
+}
+
+/**
+ * The transcript replay folds a single system prompt string into its leading
+ * system-state entry; omp splits the prompt into segments.
+ */
+function joinSystemPrompt(systemPrompt: PromptContext["systemPrompt"]): string | undefined {
+	if (systemPrompt === undefined) return undefined;
+	return typeof systemPrompt === "string" ? systemPrompt : systemPrompt.join("\n\n");
 }
 
 async function authenticateForCredential(
@@ -968,7 +1002,7 @@ function permissionView(permission: PendingPermission): PermissionView {
 	};
 }
 
-function findPermissionResult(context: Context, requestId: string): PermissionToolResult | undefined {
+function findPermissionResult(context: PromptContext, requestId: string): PermissionToolResult | undefined {
 	for (let index = context.messages.length - 1; index >= 0; index--) {
 		const message = context.messages[index];
 		if (
@@ -997,12 +1031,12 @@ function findPermissionResult(context: Context, requestId: string): PermissionTo
 	return undefined;
 }
 
-function messagesFingerprint(messages: Context["messages"]): string {
+function messagesFingerprint(messages: readonly TranscriptEntry[]): string {
 	const fingerprints = messages.map(messageFingerprint);
 	return createHash("sha256").update(fingerprints.join("\n")).digest("hex");
 }
 
-function messageFingerprint(message: Context["messages"][number]): string {
+function messageFingerprint(message: TranscriptEntry): string {
 	let value: unknown;
 	if (message.role === "user") {
 		value = { role: message.role, content: message.content };
@@ -1021,6 +1055,10 @@ function messageFingerprint(message: Context["messages"][number]): string {
 			toolsAdded: message.toolsAdded,
 			toolsRemoved: message.toolsRemoved,
 		};
+	} else if (message.role === "developer") {
+		// `canonicalJson` drops undefined fields, so this matches the historical
+		// fingerprint of a developer message (role + content only).
+		value = { role: message.role, content: message.content };
 	} else {
 		value = {
 			role: message.role,
@@ -1046,7 +1084,7 @@ function canonicalJson(value: unknown): string {
 }
 
 function findToolResult(
-	context: Context,
+	context: PromptContext,
 	toolCallId: string,
 	toolName: string,
 ): ToolResultMessage | undefined {
@@ -1081,7 +1119,7 @@ function cancelPermission(binding: Binding): void {
 	binding.permission = undefined;
 }
 
-function instructionFingerprint(context: Context): string {
+function instructionFingerprint(context: PromptContext): string {
 	return createHash("sha256").update(currentSystemInstructions(context)).digest("hex");
 }
 
