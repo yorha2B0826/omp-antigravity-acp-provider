@@ -67,14 +67,24 @@ upstream package.
 
 ## Verification status
 
-- The extension loads under `omp -e ./extensions/index.ts` with no errors.
-- The provider registers and exposes four models
-  (`gemini-3.8-flash`, `gemini-3.7-flash`, `gemini-3.6-flash`, `gemini-3.1-pro`);
-  the `antigravity-acp` OAuth provider appears in the in-session login list.
-- A live `streamSimple` reaches the ACP server and returns a protocol-level
-  response (e.g. `Model '…' is not available for the current authentication
-  method.` when no Google credential is present) — i.e. provider → ACP → Google
-  wiring is intact.
+Verified against a live Antigravity ACP session on omp 18.8.9:
+
+- The extension loads under `omp -e ./extensions/index.ts` with no errors, and
+  the provider registers four models (`gemini-3.8-flash`, `gemini-3.7-flash`,
+  `gemini-3.6-flash`, `gemini-3.1-pro`); the `antigravity-acp` OAuth provider
+  appears in the in-session login list.
+- A streamed turn completes end-to-end (provider → ACP → Google), and the
+  `low`/`high` reasoning tiers resolve to their advertised variant ids.
+- omp tools round-trip through the loopback MCP bridge (a model-initiated
+  `bash` call returns its result).
+- **Fixed in this port:** the collapsed→effort-qualified model-id re-expansion.
+  Antigravity advertises effort-qualified ids (`gemini-3.8-flash-high`, …) and
+  the provider collapses them into one entry per model, re-expanding per turn
+  from the selected reasoning effort via a host `thinkingLevelMap`. omp's
+  declarative `ProviderModelConfig` has no such field, so the mapping is kept in
+  an internal `VARIANT_REGISTRY` (`src/models.ts`) instead. Without it every
+  turn sends the bare collapsed id and the ACP server rejects it with
+  `-32602 Model '…' is not available for the current authentication method.`
 - The unit suite (`bun run test`) passes 146 tests. Five test files
   (`provider`, `models`, `runtime`, `runtime-safety`, `pi-events`) plus
   `supervisor` fail to *load* because omp's published `@oh-my-pi/*` packages are
