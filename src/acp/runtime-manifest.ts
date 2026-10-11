@@ -5,6 +5,10 @@ const MANIFEST_PUBLIC_KEY = `-----BEGIN PUBLIC KEY-----
 MCowBQYDK2VwAyEAxmka3YjT7PpPic+rroqg9bhFbSmh79ZtMwlpGlwCDLA=
 -----END PUBLIC KEY-----`;
 
+// Deliberately points at upstream: the manifest is Ed25519-verified against
+// MANIFEST_PUBLIC_KEY below, so it must come from the repo that holds the
+// matching private key. This fork consumes the upstream signed catalog and does
+// not publish its own.
 export const RUNTIME_MANIFEST_URL =
 	"https://raw.githubusercontent.com/zacbemis/pi-antigravity-acp-provider/main/runtime-manifest.json";
 export const BUNDLED_RUNTIME_MANIFEST = new URL("../../runtime-manifest.json", import.meta.url);

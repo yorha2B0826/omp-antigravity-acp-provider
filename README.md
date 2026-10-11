@@ -1,6 +1,14 @@
-# pi-antigravity-acp-provider
+# omp-antigravity-acp-provider
 
-A first-class [Pi](https://github.com/earendil-works/pi) provider for **Google Antigravity** through its official ACP server.
+A first-class provider for **Google Antigravity** through its official ACP
+server, targeting **Oh My Pi (omp)**. The package also still loads under upstream
+[Pi](https://github.com/earendil-works/pi) via its `pi` manifest key.
+
+> **Fork.** This is the omp port of
+> [zacbemis/pi-antigravity-acp-provider](https://github.com/zacbemis/pi-antigravity-acp-provider),
+> maintained at
+> [yorha2B0826/omp-antigravity-acp-provider](https://github.com/yorha2B0826/omp-antigravity-acp-provider).
+> See [`docs/OMP-PORT.md`](./docs/OMP-PORT.md) for the host-adapter changes.
 
 > **Important:** this package no longer uses `@google/gemini-cli`. The Gemini CLI individual Code Assist login path was retired and is not a supported authentication route. Antigravity/`agy` is the target runtime.
 
@@ -26,23 +34,22 @@ A first-class [Pi](https://github.com/earendil-works/pi) provider for **Google A
 
 ## New-user setup
 
-Install from the official Pi package gallery/npm:
+Install into omp (from this fork):
 
 ```bash
-pi install npm:pi-antigravity-acp-provider
-pi
+omp plugin install git@github.com:yorha2B0826/omp-antigravity-acp-provider.git#main
 ```
 
-To run from source instead:
+Or run from a source checkout:
 
 ```bash
-git clone https://github.com/zacbemis/pi-antigravity-acp-provider.git
-cd pi-antigravity-acp-provider
-npm install
-pi --no-extensions -e ./extensions/index.ts
+git clone https://github.com/yorha2B0826/omp-antigravity-acp-provider.git
+cd omp-antigravity-acp-provider
+bun install
+omp -e ./extensions/index.ts
 ```
 
-In Pi:
+In omp:
 
 1. Optionally run `/antigravity-acp setup` for a runtime/auth preflight.
 2. Run `/login`.

@@ -1,6 +1,6 @@
 # omp port
 
-This branch retargets `pi-antigravity-acp-provider` from upstream Pi
+This port retargets the package from upstream Pi (`pi-antigravity-acp-provider`)
 (`@earendil-works/*`) to **Oh My Pi / omp** (`@oh-my-pi/*`, verified against omp
 18.8.9). The ACP backend — runtime discovery, the signed runtime catalog, the
 supervisor, ACP v1 connection/session state, streaming, the loopback MCP tool
@@ -47,8 +47,8 @@ ACP install.
 ## Install (as an omp extension)
 
 ```bash
-git clone https://github.com/yorha2B0826/pi-antigravity-acp-provider  # this fork
-cd pi-antigravity-acp-provider
+git clone https://github.com/yorha2B0826/omp-antigravity-acp-provider  # this fork
+cd omp-antigravity-acp-provider
 bun install
 omp plugin link "$PWD"
 ```
