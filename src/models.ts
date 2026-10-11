@@ -30,6 +30,17 @@ const ZERO_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } as const;
 type Effort = "low" | "medium" | "high";
 type Variants = Partial<Record<Effort, string>>;
 
+/**
+ * Collapsed model id → effort → exact Antigravity ACP model id.
+ *
+ * Antigravity advertises effort-qualified ids (`gemini-3.8-flash-high`, …); the
+ * provider collapses them into one entry per model and re-expands on each turn
+ * from the selected reasoning effort. omp's declarative `ProviderModelConfig`
+ * has no `thinkingLevelMap` field, so the mapping is kept here instead of on the
+ * host model object.
+ */
+const VARIANT_REGISTRY = new Map<string, Variants>();
+
 export const FALLBACK_MODELS: readonly AcpModel[] = [
 	reasoningModel("gemini-3.8-flash", "Gemini 3.8 Flash", {
 		low: "gemini-3.8-flash-low",
@@ -103,7 +114,7 @@ export function resolveAcpModelId(
 	model: AcpModel,
 	reasoning: string | undefined,
 ): string {
-	const map = model.thinkingLevelMap;
+	const map = model.thinkingLevelMap ?? VARIANT_REGISTRY.get(model.id);
 	if (!model.reasoning || !map) return model.id;
 	const preferred: Effort =
 		reasoning === "minimal" || reasoning === "low"
@@ -138,6 +149,7 @@ function reasoningModel(
 		xhigh: null,
 		max: null,
 	};
+	VARIANT_REGISTRY.set(id, variants);
 	return baseModel(id, name, true, thinkingLevelMap);
 }
 
