@@ -31,21 +31,26 @@ import {
 	ACP_SDK_VERSION,
 	PACKAGE_VERSION,
 } from "../src/constants.js";
-import { createAntigravityProvider, PROVIDER_ID } from "../src/provider.js";
+import { PROVIDER_ID } from "../src/provider.js";
 import {
-	AntigravityRuntime,
 	PERMISSION_RESULT_KIND,
 	PERMISSION_TOOL_NAME,
+	type AntigravityConnectionFactory,
 	type PermissionToolResult,
 } from "../src/runtime.js";
+import { acquireSharedRuntime, releaseSharedRuntime } from "../src/shared-runtime.js";
 import { runSetupWizard } from "../src/wizard.js";
 
 /** Parameters of the permission tool, as omp's schema facade describes them. */
 type PermissionToolParameters = TObject<{ requestId: TString }>;
 
 export default function antigravityAcpExtension(pi: ExtensionAPI): void {
-	const runtime = new AntigravityRuntime(undefined, loadConfig().permissions);
-	const { provider } = createAntigravityProvider(runtime);
+	registerAntigravityAcp(pi);
+}
+
+export function registerAntigravityAcp(pi: ExtensionAPI, connectionFactory?: AntigravityConnectionFactory): void {
+	const shared = acquireSharedRuntime(connectionFactory);
+	const { runtime, provider } = shared;
 	// omp exposes only the declarative overload: registerProvider(name, config).
 	pi.registerProvider(PROVIDER_ID, provider);
 
@@ -217,6 +222,11 @@ export default function antigravityAcpExtension(pi: ExtensionAPI): void {
 		},
 	};
 	pi.registerCommand("antigravity-acp", commandDefinition);
+	// Upstream added a deprecated alias; kept so fork users keep upstream's CLI shape.
+	pi.registerCommand("gemini-acp", {
+		...commandDefinition,
+		description: "Deprecated alias for /antigravity-acp",
+	});
 	pi.registerCommand("antigravity-acp-reload", {
 		description: "Reload the Antigravity ACP provider (re-register provider, models, and tool)",
 		handler: async (_args, ctx) => {
@@ -247,8 +257,11 @@ export default function antigravityAcpExtension(pi: ExtensionAPI): void {
 		}
 	});
 
-	pi.on("session_shutdown", async () => {
-		await runtime.close();
+	// omp fires `session_shutdown` only on process exit (SIGINT/SIGTERM) and its
+	// event carries no reason, so the release is always the final quit.
+	pi.on("session_shutdown", async (_event, ctx) => {
+		await runtime.closeSession(ctx.sessionManager.getSessionId());
+		await releaseSharedRuntime(shared, "quit");
 	});
 }
 

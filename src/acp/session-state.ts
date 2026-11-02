@@ -3,7 +3,7 @@ import type {
 	SessionConfigOption,
 	SessionConfigSelectOption,
 	SessionModeState,
-} from "@agentclientprotocol/sdk";
+} from "@agentclientprotocol/sdk/unstable";
 import { z } from "zod";
 
 import { splitEffortSuffix } from "../models.js";
@@ -37,8 +37,8 @@ const stateSchema = z.object({
 	models: z.object({ currentModelId: z.string(), availableModels: z.array(z.object({ modelId: z.string(), name: z.string() })) }).nullish(),
 });
 
-/** SDK 1.x no longer exports response validators or draft model types. Validate
- * the state we use explicitly, preserving legacy metadata without private imports. */
+/** Validate the state we use explicitly, preserving Antigravity's legacy model
+ * metadata even when it is absent from the SDK's generated response types. */
 export function decodeSessionState(response: unknown): SessionState {
 	const parsed = stateSchema.safeParse(response);
 	if (!parsed.success) throw new AntigravityAcpError("protocol", "Invalid ACP session configuration");

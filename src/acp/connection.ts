@@ -1,6 +1,8 @@
 import {
-	ClientSideConnection,
+	client,
+	methods,
 	PROTOCOL_VERSION,
+	type ClientConnection,
 	RequestError,
 	type AuthenticateRequest,
 	type InitializeResponse,
@@ -10,7 +12,7 @@ import {
 	type RequestPermissionRequest,
 	type RequestPermissionResponse,
 	type SessionNotification,
-} from "@agentclientprotocol/sdk";
+} from "@agentclientprotocol/sdk/unstable";
 
 import { PACKAGE_VERSION } from "../constants.js";
 import { boundedNdjsonStream } from "./bounded-stream.js";
@@ -47,7 +49,7 @@ export interface AntigravityConnectionOptions extends AntigravityProcessOptions 
 export class AntigravityAcpConnection {
 	readonly process: AntigravityProcess;
 	readonly initialized: Promise<InitializeResponse>;
-	private readonly connection: ClientSideConnection;
+	private readonly connection: ClientConnection;
 	private readonly operationTimeoutMs: number;
 	private readonly promptIdleTimeoutMs: number;
 	private readonly promptWorkIdleTimeoutMs: number;
@@ -93,33 +95,32 @@ export class AntigravityAcpConnection {
 			},
 			closeOnProtocolError: true,
 		});
-		this.connection = new ClientSideConnection(
-			() => ({
-				requestPermission: async (request) => {
-					const release = this.watchdogs.get(request.sessionId)?.beginPermission();
-					try {
-						return (await this.handlers.onPermission?.(request)) ?? { outcome: { outcome: "cancelled" } };
-					} finally {
-						release?.();
-					}
-				},
-				sessionUpdate: async (notification) => {
-					this.watchdogs.get(notification.sessionId)?.noteUpdate(notification);
-					if (notification.update.sessionUpdate === "config_option_update") {
-						this.updateSessionState(notification.sessionId, notification.update);
-					} else if (notification.update.sessionUpdate === "current_mode_update") {
-						const state = this.getSessionState(notification.sessionId);
-						if (state.modes) this.sessions.set(notification.sessionId, {
-							...state, modes: { ...state.modes, currentModeId: notification.update.currentModeId },
-						});
-					}
-					await this.handlers.onUpdate?.(notification);
-				},
-			}),
-			stream,
-		);
+		// Antigravity uses ACP v1 draft fields such as prompt usage and session
+		// resume. Opt into the full v1 surface, not the experimental v2 protocol.
+		this.connection = client({ name: "pi-antigravity-acp-provider" })
+			.onRequest(methods.client.session.requestPermission, async ({ params: request }) => {
+				const release = this.watchdogs.get(request.sessionId)?.beginPermission();
+				try {
+					return (await this.handlers.onPermission?.(request)) ?? { outcome: { outcome: "cancelled" } };
+				} finally {
+					release?.();
+				}
+			})
+			.onNotification(methods.client.session.update, async ({ params: notification }) => {
+				this.watchdogs.get(notification.sessionId)?.noteUpdate(notification);
+				if (notification.update.sessionUpdate === "config_option_update") {
+					this.updateSessionState(notification.sessionId, notification.update);
+				} else if (notification.update.sessionUpdate === "current_mode_update") {
+					const state = this.getSessionState(notification.sessionId);
+					if (state.modes) this.sessions.set(notification.sessionId, {
+						...state, modes: { ...state.modes, currentModeId: notification.update.currentModeId },
+					});
+				}
+				await this.handlers.onUpdate?.(notification);
+			})
+			.connect(stream);
 		this.initialized = this.withDeadline(
-			this.connection.initialize({
+			this.connection.agent.request(methods.agent.initialize, {
 				protocolVersion: PROTOCOL_VERSION,
 				clientCapabilities: {
 					fs: { readTextFile: false, writeTextFile: false },
@@ -161,7 +162,7 @@ export class AntigravityAcpConnection {
 	): Promise<void> {
 		await this.initialize();
 		await this.withAbort(
-			this.withDeadline(this.connection.authenticate(request), timeoutMs, "authenticate"),
+			this.withDeadline(this.connection.agent.request(methods.agent.authenticate, request), timeoutMs, "authenticate"),
 			signal,
 		);
 	}
@@ -174,7 +175,7 @@ export class AntigravityAcpConnection {
 		await this.initialize();
 		const response = await this.withAbort(
 			this.withDeadline(
-				this.connection.newSession({ cwd, mcpServers }),
+				this.connection.agent.request(methods.agent.session.new, { cwd, mcpServers }),
 				this.operationTimeoutMs,
 				"session/new",
 			),
@@ -197,7 +198,7 @@ export class AntigravityAcpConnection {
 		await this.initialize();
 		const response = await this.withAbort(
 			this.withDeadline(
-				this.connection.loadSession({ sessionId, cwd, mcpServers }),
+				this.connection.agent.request(methods.agent.session.load, { sessionId, cwd, mcpServers }),
 				this.operationTimeoutMs,
 				"session/load",
 			),
@@ -215,7 +216,7 @@ export class AntigravityAcpConnection {
 		await this.initialize();
 		const response = await this.withAbort(
 			this.withDeadline(
-				this.connection.resumeSession({ sessionId, cwd, mcpServers }),
+				this.connection.agent.request(methods.agent.session.resume, { sessionId, cwd, mcpServers }),
 				this.operationTimeoutMs,
 				"session/resume",
 			),
@@ -250,7 +251,7 @@ export class AntigravityAcpConnection {
 		// method. Preserve its classified auth/transport errors and their causes.
 		await this.withAbort(
 			this.withDeadline(
-				this.connection.request("session/set_model", { sessionId, modelId }),
+				this.connection.agent.request("session/set_model", { sessionId, modelId }),
 				this.operationTimeoutMs,
 				"session/set_model",
 			),
@@ -263,7 +264,7 @@ export class AntigravityAcpConnection {
 		if (await this.setSelector(sessionId, "mode", modeId, signal)) return;
 		await this.withAbort(
 			this.withDeadline(
-				this.connection.setSessionMode({ sessionId, modeId }),
+				this.connection.agent.request(methods.agent.session.setMode, { sessionId, modeId }),
 				this.operationTimeoutMs,
 				"session/set_mode",
 			),
@@ -319,10 +320,11 @@ export class AntigravityAcpConnection {
 	}
 
 	async cancel(sessionId: string): Promise<void> {
-		await this.connection.cancel({ sessionId });
+		await this.connection.agent.notify(methods.agent.session.cancel, { sessionId });
 	}
 
 	async close(): Promise<void> {
+		this.connection.close();
 		this.closePromise ??= this.process.close();
 		await this.closePromise;
 	}
@@ -356,7 +358,7 @@ export class AntigravityAcpConnection {
 		if (!selector) return false;
 		const response = await this.withAbort(
 			this.withDeadline(
-				this.connection.setSessionConfigOption({ sessionId, configId: selector.id, value }),
+				this.connection.agent.request(methods.agent.session.setConfigOption, { sessionId, configId: selector.id, value }),
 				this.operationTimeoutMs,
 				"session/set_config_option",
 			),
@@ -409,7 +411,7 @@ export class AntigravityAcpConnection {
 		watchdog.arm();
 		try {
 			return await Promise.race([
-				this.connection.prompt(request).catch((error: unknown) => { throw classifyError(error); }),
+				this.connection.agent.request(methods.agent.session.prompt, request).catch((error: unknown) => { throw classifyError(error); }),
 				this.protocolFailure, this.processFailure, stalled,
 			]);
 		} finally {

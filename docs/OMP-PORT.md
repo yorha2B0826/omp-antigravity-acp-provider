@@ -96,16 +96,17 @@ Verified against a live Antigravity ACP session on omp 18.8.9:
 ## Testing and CI (fork)
 
 - `npm run check` (tsc + vitest) runs under Node against the published
-  `@oh-my-pi/*` type surfaces. Six suites (`provider`, `models`, `runtime`,
-  `runtime-safety`, `pi-events`, `model-selection.integration`) import host
-  packages whose entries are raw TypeScript that touches the `Bun` global; Node
-  cannot execute them, so `vitest.config.ts` excludes them from the Node run
-  (they still type-check). Run them with a real Bun runtime when needed:
+  `@oh-my-pi/*` type surfaces. Seven suites (`provider`, `models`, `runtime`,
+  `runtime-safety`, `pi-events`, `model-selection.integration`, `extension`)
+  import host packages whose entries are raw TypeScript that touches the `Bun`
+  global; Node cannot execute them, so `vitest.config.ts` excludes them from the
+  Node run (they still type-check). Run them with a real Bun runtime when needed:
   `bun test test/<file>` — note that Bun's own runner is missing a few vitest
   APIs in some other suites (`toHaveBeenCalledExactlyOnceWith`, `vi.waitFor`,
-  fake-timer semantics), and `expect(pendingPromise).rejects` stalls the event
-  loop while an ACP child process is alive (settle the promise explicitly
-  instead — see `model-selection.integration.test.ts`); those are runner
+  `vi.stubEnv`, `vi.resetModules`, fake-timer semantics), and
+  `expect(pendingPromise).rejects` stalls the event loop while an ACP child
+  process is alive (settle the promise explicitly instead — see
+  `model-selection.integration.test.ts`); those are runner
   limitations, not failures of this package.
 - `npm run test:packed` packs the package, installs it (production deps) into
   a temp directory, and loads the packed extension in the real omp CLI via

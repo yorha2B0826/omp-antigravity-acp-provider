@@ -1,4 +1,4 @@
-import type { SessionNotification } from "@agentclientprotocol/sdk";
+import type { SessionNotification } from "@agentclientprotocol/sdk/unstable";
 
 /** Progress, not total turn duration, bounds a prompt. Outstanding work gets
  * a longer but still finite inactivity window; a lost tool update cannot hang forever. */

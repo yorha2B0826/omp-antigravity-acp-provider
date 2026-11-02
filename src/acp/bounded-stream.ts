@@ -1,4 +1,4 @@
-import type { AnyMessage, Stream } from "@agentclientprotocol/sdk";
+import type { AnyMessage, Stream } from "@agentclientprotocol/sdk/unstable";
 
 export const DEFAULT_MAX_FRAME_BYTES = 32 * 1024 * 1024;
 

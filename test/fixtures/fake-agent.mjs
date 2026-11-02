@@ -41,7 +41,7 @@ for await (const line of rl) {
 	}
 	const { id, method, params } = message;
 	if (process.env.FAKE_AGENT_LOG_FILE && method) fs.appendFileSync(process.env.FAKE_AGENT_LOG_FILE,
-		JSON.stringify({ method, ...(method === "session/prompt" ? { prompt: params.prompt, mode } : {}), ...(method === "session/set_mode" ? { modeId: params.modeId } : {}) }) + "\n");
+		JSON.stringify({ method, ...(method === "initialize" ? { params } : {}), ...(method === "session/prompt" ? { prompt: params.prompt, mode } : {}), ...(method === "session/set_mode" ? { modeId: params.modeId } : {}) }) + "\n");
 	if (id === "permission-1" && method === undefined) {
 		if (permissionPromptId === undefined) continue;
 		const decision = message.result?.outcome?.outcome ?? "cancelled";
@@ -242,6 +242,23 @@ for await (const line of rl) {
 			});
 			continue;
 		}
+		if (scenario === "quota-exhausted") {
+			// agy reports exhaustion as a plain reply: no usage, and `refusal` when the SDK flags it.
+			const reset = text.includes("absolute") ? " Your limit will reset on Oct 2, 2026 14:00 UTC."
+				: text.includes("no reset") ? "" : " Your limit will reset in 3 hours, 51 minutes.";
+			send({
+				jsonrpc: "2.0",
+				method: "session/update",
+				params: {
+					sessionId: params.sessionId,
+					update: { sessionUpdate: "agent_message_chunk", content: { type: "text",
+						text: `Usage Limit Reached\n\nYou have reached your current quota for this period.${reset}` } },
+				},
+			});
+			send({ jsonrpc: "2.0", id, result: { stopReason: text.includes("refusal") ? "refusal" : "end_turn",
+				...(text.includes("refusal") || text.includes("quoted") ? { usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 } } : {}) } });
+			continue;
+		}
 		if (!continuing && text.includes("hang")) {
 			hangingPromptId = id;
 			continue;
@@ -284,7 +301,10 @@ for await (const line of rl) {
 			id,
 			result: {
 				stopReason: "end_turn",
-				_meta: { quota: { token_count: { input_tokens: 7, output_tokens: 3 }, model_usage: [] } },
+				...(scenario === "sdk-usage" ? {
+					usage: { inputTokens: 17, outputTokens: 5, totalTokens: 22, cachedReadTokens: 3, thoughtTokens: 2 },
+					_meta: { quota: { remaining: 12, limit: 20 } },
+				} : { _meta: { quota: { token_count: { input_tokens: 7, output_tokens: 3 }, model_usage: [] } } }),
 			},
 		});
 	} else {

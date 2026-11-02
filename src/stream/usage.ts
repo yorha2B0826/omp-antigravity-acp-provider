@@ -1,4 +1,4 @@
-import type { PromptResponse } from "@agentclientprotocol/sdk";
+import type { PromptResponse } from "@agentclientprotocol/sdk/unstable";
 import type { Usage } from "@oh-my-pi/pi-ai";
 
 export function emptyUsage(): Usage {

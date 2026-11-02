@@ -13,7 +13,7 @@ The official ACP registry identifies Google's current release and download URLs,
 - the only two permitted archive member names and their exact sizes;
 - launch arguments.
 
-The installer verifies the signature using the public key embedded in the package, limits metadata response sizes, checks that the signed release agrees with the official registry, downloads into a private staging directory, enforces archive hash and size, rejects extra or unsafe ZIP members, and starts the extracted binary. It activates the immutable hash-named release only if ACP `initialize` reports protocol 1, agent name `antigravity-acp`, and the signed version. The prior release remains available while the `current` pointer changes atomically.
+The installer verifies the signature using the public key embedded in the package, limits metadata response sizes, checks that the signed archive URL agrees with the official registry when both identify the same version, downloads into a private staging directory, enforces archive hash and size, rejects extra or unsafe ZIP members, and starts the extracted binary. It activates the immutable hash-named release only if ACP `initialize` reports protocol 1, agent name `antigravity-acp`, and the signed version. The prior release remains available while the `current` pointer changes atomically.
 
 This follows the important installation properties used by T3 Code's open-source Antigravity integration: immutable hash-addressed releases, exact archive/member sizes, strict extraction, pre-activation ACP validation, and a separate active pointer. T3 Code also pins reviewed release metadata rather than blindly executing the newest registry URL.
 
@@ -30,7 +30,21 @@ This follows the important installation properties used by T3 Code's open-source
 - `notify` checks and reports an available signed release without installing it.
 - `manual` performs no background update check; `/antigravity-acp update` forces one.
 
-If the registry is unavailable, a working managed runtime remains usable. A first installation requires the official registry to be reachable; later checks may use cached registry metadata and the bundled or cached signed manifest. If the official registry is newer than the signed catalog, installation waits for the catalog automation instead of running an unverified artifact.
+If the registry is unavailable, a working managed runtime remains usable. A first installation requires the official registry to be reachable; later checks may use cached registry metadata and the bundled or cached signed manifest. If the official registry is newer than the signed catalog, both automatic setup and explicit updates can install the latest approved release instead. Explicit updates report the pending upstream version through the progress callback. Signature, archive hash/size, extraction, and ACP identity checks remain mandatory; the unapproved release is never downloaded or executed. An already newer managed runtime is retained, never downgraded.
+
+## Programmatic bootstrap during catalog lag
+
+`checkAntigravityAcpUpdate(true)` reports `latestVersion` (upstream), `approvedVersion` (the selected signed release), and `approvalPending` (upstream is newer than the signed catalog). `approvalPending` is advisory: it does not mean that `approvedVersion` cannot be installed. Bootstrap adapters should not abort solely because it is true, even when no managed runtime exists.
+
+```typescript
+const status = await checkAntigravityAcpUpdate(true);
+if (status.managed && status.updateAvailable) {
+  // Rechecks metadata and installs only an approved release, even during catalog lag.
+  await updateAntigravityAcpRuntime(onProgress);
+}
+```
+
+For setup rather than an explicit forced update, `ensureAntigravityAcpReady(onProgress)` also supports this signed-release fallback. External runtimes remain owned by their own installer.
 
 ## Publishing new runtime metadata
 

@@ -1,6 +1,6 @@
 # ACP ↔ Pi protocol mapping
 
-This document specifies the translation contract. Exact TypeScript names must be updated to the pinned SDK, but semantics should remain covered by fixtures.
+This document specifies the translation contract. SDK 2.2.0 uses the `client()` app and peer-context `request()`/`notify()` APIs. All protocol imports select `@agentclientprotocol/sdk/unstable` for the full ACP v1 schema, including draft prompt usage and session lifecycle fields; this does not enable experimental ACP v2. Semantics remain covered by fixtures.
 
 ## 1. Handshake
 

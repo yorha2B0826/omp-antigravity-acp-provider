@@ -1,4 +1,4 @@
-import type { StopReason as AcpStopReason } from "@agentclientprotocol/sdk";
+import type { StopReason as AcpStopReason } from "@agentclientprotocol/sdk/unstable";
 import {
 	type AssistantMessage,
 	type AssistantMessageEventStream,

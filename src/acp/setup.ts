@@ -87,6 +87,7 @@ export interface RuntimeUpdateStatus {
 	latestVersion: string;
 	approvedVersion: string;
 	updateAvailable: boolean;
+	/** The latest upstream release is unapproved; approvedVersion remains installable. */
 	approvalPending: boolean;
 	managed: boolean;
 	launch?: AntigravityLaunch;
@@ -155,9 +156,8 @@ export async function updateAntigravityAcpRuntime(
 	}
 	const { release, officialVersion } = await resolveLatestRelease(platformKey(), true);
 	if (compareRuntimeVersions(release.version, officialVersion) < 0) {
-		throw new AntigravityAcpError(
-			"spawn",
-			`Antigravity ACP ${officialVersion} is in the official registry but its signed runtime manifest is not available yet`,
+		onProgress?.(
+			`Antigravity ACP ${officialVersion} is awaiting a signed runtime manifest; using approved release ${release.version}.`,
 		);
 	}
 	onProgress?.(`Verified signed runtime manifest for Antigravity ACP ${release.version}.`);

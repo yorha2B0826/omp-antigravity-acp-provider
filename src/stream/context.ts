@@ -1,4 +1,4 @@
-import type { ContentBlock } from "@agentclientprotocol/sdk";
+import type { ContentBlock } from "@agentclientprotocol/sdk/unstable";
 import type { TranscriptEntry, TranscriptToolLike } from "../omp/transcript.js";
 import { getCurrentSystemPrompt } from "../omp/transcript.js";
 

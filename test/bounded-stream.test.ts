@@ -1,4 +1,4 @@
-import type { AnyMessage } from "@agentclientprotocol/sdk";
+import type { AnyMessage } from "@agentclientprotocol/sdk/unstable";
 import { describe, expect, it } from "vitest";
 
 import { boundedNdjsonStream } from "../src/acp/bounded-stream.js";

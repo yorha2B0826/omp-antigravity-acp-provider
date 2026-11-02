@@ -111,6 +111,41 @@ describe("permission policy and lifecycle", () => {
 	});
 });
 
+describe("session lifecycle", () => {
+	it("closes only the ending session and keeps its saved record", async () => {
+		const fixture = setup();
+		const store = new AcpSessionStore(path.join(fixture.root, "sessions.json"));
+		const { runtime, connections } = setup(undefined, "yolo", store);
+		await turn(runtime, [user("a")], "A");
+		const first = await turn(runtime, [user("b")], "B");
+
+		await runtime.closeSession("A");
+
+		await connections[0]!.process.exited;
+		expect(connections[1]!.process.alive).toBe(true);
+		expect(store.get("A")).toBeDefined();
+		const next = await turn(runtime, [user("b"), first, user("next", 2)], "B");
+		expect(next.stopReason).toBe("stop");
+		expect((await runtime.snapshot()).processes[0]?.pid).toBe(connections[1]!.process.pid);
+		expect(connections).toHaveLength(2);
+	});
+
+	it("aborts and waits for an in-flight turn before closing its session", async () => {
+		const { runtime, connections, entries } = setup();
+		const writer = runtime.stream(model, { messages: [user("hang")] }, { sessionId: "A", apiKey: "test-key" });
+		const events: Array<{ type: string; reason?: string }> = [];
+		const drained = (async () => { for await (const event of writer.stream) events.push(event); })();
+		await vi.waitFor(() => expect(entries().some((entry) => entry.method === "session/prompt")).toBe(true));
+
+		await runtime.closeSession("A");
+
+		await drained;
+		expect(events.at(-1)).toMatchObject({ type: "error", reason: "aborted" });
+		await connections[0]!.process.exited;
+		expect((await runtime.snapshot()).bindings).toBe(0);
+	});
+});
+
 describe("instruction updates during continuations", () => {
 	it.each([false, true])("rebuilds with changed instructions instead of pretending they reached ACP (restart=%s)", async (restart) => {
 		const fixture = setup();
@@ -267,6 +302,57 @@ describe("abort cleanup", () => {
 		const pending = internals.awaitContinuation(binding, controller.signal);
 		binding.turnCompletion = new Promise<void>(() => undefined); controller.abort(); complete(); await pending;
 		expect(binding.connection.cancel).not.toHaveBeenCalled(); expect(binding.connection.close).not.toHaveBeenCalled();
+	});
+});
+
+describe("quota exhaustion", () => {
+	function quotaSetup() {
+		const fixture = setup();
+		const store = new AcpSessionStore(path.join(fixture.root, "sessions.json"));
+		return { store, ...setup("quota-exhausted", "yolo", store) };
+	}
+
+	it("ends the turn with an error that carries the relative reset time", async () => {
+		const { runtime, store } = quotaSetup();
+		const message = await turn(runtime, [user("relative")], "quota");
+		expect(message.stopReason).toBe("error");
+		expect(message.errorMessage).toMatch(/^Antigravity quota exceeded for \S+\. Resets at \S+\.$/u);
+		expect(message.errorMessage).not.toMatch(/429|rate limit|try again in|reset in/iu);
+		const resetAt = Date.parse(/Resets at (\S+)\.$/u.exec(message.errorMessage!)![1]!);
+		expect(Math.abs(resetAt - (Date.now() + 231 * 60_000))).toBeLessThan(60_000);
+		const snapshot = await runtime.snapshot();
+		expect(snapshot.bindings).toBe(1);
+		expect(snapshot.processes[0]?.alive).toBe(true);
+		expect(store.get("quota")?.messageCount ?? 0).toBe(0);
+	});
+
+	it("converts the absolute reset date to ISO", async () => {
+		const { runtime } = quotaSetup();
+		const message = await turn(runtime, [user("absolute")], "quota");
+		expect(message.stopReason).toBe("error");
+		expect(message.errorMessage).toContain("Resets at 2026-10-02T14:00:00.000Z.");
+	});
+
+	it("ends without a reset clause when Antigravity gives none", async () => {
+		const { runtime } = quotaSetup();
+		const message = await turn(runtime, [user("no reset")], "quota");
+		expect(message.stopReason).toBe("error");
+		expect(message.errorMessage).toMatch(/^Antigravity quota exceeded for .+\.$/u);
+		expect(message.errorMessage).not.toContain("Resets at");
+	});
+
+	it("treats a refusal carrying the quota message as an error", async () => {
+		const { runtime } = quotaSetup();
+		const message = await turn(runtime, [user("refusal")], "quota");
+		expect(message.stopReason).toBe("error");
+		expect(message.errorMessage).toMatch(/quota exceeded/u);
+	});
+
+	it("leaves a normal reply that quotes the wording untouched", async () => {
+		const { runtime } = quotaSetup();
+		const message = await turn(runtime, [user("quoted")], "quota");
+		expect(message.stopReason).toBe("stop");
+		expect(message.content).toEqual([expect.objectContaining({ type: "text", text: expect.stringContaining("You have reached your current quota") })]);
 	});
 });
 

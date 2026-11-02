@@ -33,7 +33,14 @@ jobs:
       - run: npm run check
       - run: npm run pack:check
       - run: npm run test:packed
-      - name: Audit dependencies (including development tools)
+      - name: Audit shipped dependencies
+        run: npm audit --omit=dev --audit-level=moderate
+      - name: Audit all dependencies (informational)
+        # Dev-only tree: the host @oh-my-pi/* devDependency pins puppeteer-core →
+        # chromium-bidi → zod 3.x, and zod's fix only exists on 4.6.6+, which
+        # chromium-bidi's `^3.24.1` range cannot take. Not shipped, so it must not
+        # block the release; kept visible here instead.
+        continue-on-error: true
         run: npm audit --audit-level=moderate
 
   report-dispatched-results:
