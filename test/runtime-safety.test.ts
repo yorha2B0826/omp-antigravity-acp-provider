@@ -11,10 +11,27 @@ import { AntigravityAcpConnection } from "../src/acp/connection.js";
 import { AcpSessionStore } from "../src/acp/session-store.js";
 import { AntigravityRuntime, PERMISSION_TOOL_NAME, PERMISSION_RESULT_KIND } from "../src/runtime.js";
 import type { PermissionMode } from "../src/config.js";
+import type { AntigravityQuotaSnapshot } from "../src/acp/usage-quota.js";
 import type { PiEventWriter } from "../src/stream/pi-events.js";
 import { piToolFingerprint, PiMcpBridge } from "../src/mcp/bridge.js";
 
 const fakeAgent = fileURLToPath(new URL("./fixtures/fake-agent.mjs", import.meta.url));
+
+// Bun's runner has no `vi.stubEnv`, so env isolation is done by hand; both
+// helpers mirror the vitest semantics (restore the previous value, then clear).
+const stubbedEnv = new Map<string, string | undefined>();
+function stubEnv(name: string, value: string) {
+	if (!stubbedEnv.has(name)) stubbedEnv.set(name, process.env[name]);
+	process.env[name] = value;
+}
+function unstubAllEnvs() {
+	for (const [name, value] of stubbedEnv) {
+		if (value === undefined) delete process.env[name];
+		else process.env[name] = value;
+	}
+	stubbedEnv.clear();
+}
+
 /**
  * The legacy TypeBox builder result and omp's `TSchema` are different type
  * systems; omp shims `typebox` onto its own schema facade at runtime, so the
@@ -108,6 +125,37 @@ describe("permission policy and lifecycle", () => {
 		expect(await discovery).toBeInstanceOf(Error);
 		expect(connections[0]?.process.alive).toBe(false);
 		expect(entries().some((entry) => entry.method === "session/new")).toBe(false);
+	});
+});
+
+describe("context size from usage_update", () => {
+	it("reports each message's context size instead of the turn's summed usage", async () => {
+		const { runtime } = setup();
+		const first = await drain(runtime.stream(model, { tools, messages: [user("bridge usage")] }, { sessionId: "usage", apiKey: "test-key" }));
+		expect(first.stopReason).toBe("toolUse");
+		expect(first.usage.totalTokens).toBe(1000);
+		const call = first.content.find((block) => block.type === "toolCall");
+		if (call?.type !== "toolCall") throw new Error("missing call");
+		const final = await drain(runtime.stream(model, { tools, messages: [user("bridge usage"), first,
+			{ role: "toolResult", toolCallId: call.id, toolName: call.name, content: [{ type: "text", text: "done" }], isError: false, timestamp: 2 },
+		] }, { sessionId: "usage", apiKey: "test-key" }));
+		expect(final.stopReason).toBe("stop");
+		expect(final.usage).toMatchObject({ input: 2400, output: 200, totalTokens: 1800 });
+	});
+
+	it("removes the double-counted cache read on a single-inference prompt", async () => {
+		const { runtime } = setup();
+		const first = await turn(runtime, [user("usage single")]);
+		expect(first.usage).toMatchObject({ input: 600, cacheRead: 400, totalTokens: 1200 });
+		const second = await turn(runtime, [user("usage single"), first, user("usage single", 3)]);
+		expect(second.usage).toMatchObject({ input: 600, cacheRead: 400, totalTokens: 1200 });
+	});
+
+	it("keeps the prompt response usage when the agent sends no usage_update", async () => {
+		// Reuses the quota fixture's "quoted" reply only because it carries prompt usage without a usage_update.
+		const { runtime } = setup("quota-exhausted");
+		const message = await turn(runtime, [user("quoted")], "quota");
+		expect(message.usage).toMatchObject({ input: 10, output: 5, totalTokens: 15 });
 	});
 });
 
@@ -306,18 +354,22 @@ describe("abort cleanup", () => {
 });
 
 describe("quota exhaustion", () => {
+	afterEach(() => { vi.restoreAllMocks(); });
+
 	function quotaSetup() {
 		const fixture = setup();
 		const store = new AcpSessionStore(path.join(fixture.root, "sessions.json"));
 		return { store, ...setup("quota-exhausted", "yolo", store) };
 	}
 
-	it("ends the turn with an error that carries the relative reset time", async () => {
+	it.each([0, 429])("ends the turn with a relative reset time (%i milliseconds)", async (milliseconds) => {
+		// A valid ISO reset timestamp may contain .429Z; it is not an HTTP 429 error.
+		vi.spyOn(Date, "now").mockReturnValue(Date.UTC(2026, 10, 5, 21, 50, 0, milliseconds));
 		const { runtime, store } = quotaSetup();
 		const message = await turn(runtime, [user("relative")], "quota");
 		expect(message.stopReason).toBe("error");
 		expect(message.errorMessage).toMatch(/^Antigravity quota exceeded for \S+\. Resets at \S+\.$/u);
-		expect(message.errorMessage).not.toMatch(/429|rate limit|try again in|reset in/iu);
+		expect(message.errorMessage).not.toMatch(/\b429\b|rate limit|try again in|reset in/iu);
 		const resetAt = Date.parse(/Resets at (\S+)\.$/u.exec(message.errorMessage!)![1]!);
 		expect(Math.abs(resetAt - (Date.now() + 231 * 60_000))).toBeLessThan(60_000);
 		const snapshot = await runtime.snapshot();
@@ -418,5 +470,179 @@ describe("tool projection diagnostics", () => {
 		expect(bridge.omissions.map((entry) => entry.name)).toEqual(["t64", "t65", "t66"]);
 		expect(piToolFingerprint(tools)).not.toBe(piToolFingerprint([{ ...tools[0]!, description: "changed" }]));
 		expect(piToolFingerprint(tools)).not.toBe(piToolFingerprint([...tools, { name: "bad", description: "bad", parameters: ompSchema(Type.String()) }]));
+	});
+});
+
+describe("live quota", () => {
+	afterEach(() => { vi.useRealTimers(); });
+
+	it("reads quota with a raw /usage prompt on its own short-lived connection", async () => {
+		const { runtime, connections, entries } = setup();
+		const quota = await runtime.quota(undefined);
+		expect(quota.groups.map((group) => group.displayName)).toEqual(["Gemini Models", "Claude and GPT models", "Gemini 4 Argon"]);
+		expect(entries().filter((entry) => entry.method === "session/prompt").map((entry) => entry.prompt))
+			.toEqual([[{ type: "text", text: "/usage" }]]);
+		await connections[0]!.process.exited;
+		expect((await runtime.snapshot()).bindings).toBe(0);
+	});
+
+	it("caches a snapshot for 60 seconds and shares one request between concurrent callers", async () => {
+		vi.useFakeTimers({ toFake: ["Date"] });
+		const { runtime, connections } = setup();
+		const [first, second] = await Promise.all([runtime.quota(undefined), runtime.quota(undefined)]);
+		expect(second).toBe(first);
+		expect(await runtime.quota(undefined)).toBe(first);
+		expect(connections).toHaveLength(1);
+
+		vi.advanceTimersByTime(61_000);
+		await runtime.quota(undefined);
+		expect(connections).toHaveLength(2);
+	});
+
+	it("drops the cached snapshot on logout", async () => {
+		const { root, runtime, connections } = setup();
+		stubEnv("GEMINI_HOME", path.join(root, "gemini"));
+		try {
+			await runtime.quota(undefined);
+			await runtime.logout();
+			await runtime.quota(undefined);
+			expect(connections).toHaveLength(2);
+		} finally {
+			unstubAllEnvs();
+		}
+	});
+
+	it("does not populate the cache if logout occurs while a quota read is in flight", async () => {
+		const { root, runtime } = setup();
+		stubEnv("GEMINI_HOME", path.join(root, "gemini"));
+		try {
+			let resolveQuota!: (snapshot: AntigravityQuotaSnapshot) => void;
+			const pendingSnapshot = new Promise<AntigravityQuotaSnapshot>((resolve) => { resolveQuota = resolve; });
+			vi.spyOn(runtime as unknown as { fetchQuota: () => Promise<AntigravityQuotaSnapshot> }, "fetchQuota").mockReturnValue(pendingSnapshot);
+			const quotaPromise = runtime.quota(undefined);
+			await runtime.logout();
+			resolveQuota({ at: Date.now(), groups: [] });
+			await quotaPromise;
+			expect((runtime as unknown as { quotaCache: unknown }).quotaCache).toBeUndefined();
+		} finally {
+			unstubAllEnvs();
+		}
+	});
+
+	it("does not cache a failed quota read", async () => {
+		const { runtime, connections } = setup("usage-unavailable");
+		await expect(runtime.quota(undefined)).rejects.toThrow("Unable to retrieve quota status (backend unavailable)");
+		await expect(runtime.quota(undefined)).rejects.toThrow("no quota groups");
+		expect(connections).toHaveLength(2);
+	});
+
+	it("rejects an aborted caller without cancelling the shared request", async () => {
+		const { runtime, connections } = setup();
+		const controller = new AbortController();
+		const aborted = runtime.quota(undefined, controller.signal);
+		const shared = runtime.quota(undefined);
+		controller.abort();
+		await expect(aborted).rejects.toThrow("aborted");
+		expect((await shared).groups).toHaveLength(3);
+		expect(connections).toHaveLength(1);
+	});
+
+	it("rejects a cached quota read after close", async () => {
+		const { runtime } = setup();
+		vi.spyOn(runtime as unknown as { fetchQuota: () => Promise<AntigravityQuotaSnapshot> }, "fetchQuota")
+			.mockResolvedValue({ at: Date.now(), groups: [] });
+		await runtime.quota(undefined);
+		await runtime.close();
+		await expect(runtime.quota(undefined)).rejects.toThrow("closed");
+	});
+
+	it("rejects a quota read that would join an in-flight request after close", async () => {
+		const { runtime } = setup();
+		let resolveQuota!: (snapshot: AntigravityQuotaSnapshot) => void;
+		const pending = new Promise<AntigravityQuotaSnapshot>((resolve) => { resolveQuota = resolve; });
+		const fetchQuota = vi.spyOn(runtime as unknown as { fetchQuota: () => Promise<AntigravityQuotaSnapshot> }, "fetchQuota")
+			.mockReturnValue(pending);
+		const first = runtime.quota(undefined);
+		await runtime.close();
+		await expect(runtime.quota(undefined)).rejects.toThrow("closed");
+		resolveQuota({ at: Date.now(), groups: [] });
+		await first.catch(() => undefined);
+		expect(fetchQuota).toHaveBeenCalledTimes(1);
+	});
+
+	it("starts a fresh quota read after logout while the old one is still in flight", async () => {
+		const { root, runtime } = setup();
+		stubEnv("GEMINI_HOME", path.join(root, "gemini"));
+		try {
+			let resolveOld!: (snapshot: AntigravityQuotaSnapshot) => void;
+			let resolveNew!: (snapshot: AntigravityQuotaSnapshot) => void;
+			const oldPromise = new Promise<AntigravityQuotaSnapshot>((resolve) => { resolveOld = resolve; });
+			const newPromise = new Promise<AntigravityQuotaSnapshot>((resolve) => { resolveNew = resolve; });
+			const fetchQuota = vi.spyOn(runtime as unknown as { fetchQuota: () => Promise<AntigravityQuotaSnapshot> }, "fetchQuota")
+				.mockReturnValueOnce(oldPromise)
+				.mockReturnValueOnce(newPromise);
+
+			const old = runtime.quota(undefined);
+			await runtime.logout();
+			const fresh = runtime.quota(undefined);
+			resolveOld({ at: 1, groups: [] });
+			await old;
+			const third = runtime.quota(undefined);
+			resolveNew({ at: 2, groups: [{ displayName: "fresh", buckets: [] }] });
+
+			expect((await fresh).at).toBe(2);
+			expect((await third).at).toBe(2);
+			expect(fetchQuota).toHaveBeenCalledTimes(2);
+			expect((runtime as unknown as { quotaCache?: AntigravityQuotaSnapshot }).quotaCache?.at).toBe(2);
+		} finally {
+			unstubAllEnvs();
+		}
+	});
+});
+
+describe("throwaway conversations", () => {
+	const userSid = "0f8fad5b-d9cb-469f-a165-70867728950e";
+	function conversationsIn(root: string, sids: "uuid" | "plain" = "uuid") {
+		const acp = path.join(root, "gemini", "antigravity-acp");
+		const conversations = path.join(acp, "conversations");
+		fs.mkdirSync(conversations, { recursive: true });
+		for (const suffix of [".db", ".db-shm", ".db-wal", ".meta"]) fs.writeFileSync(path.join(conversations, userSid + suffix), "user");
+		fs.writeFileSync(path.join(acp, "acp_token.json"), "{}");
+		stubEnv("GEMINI_HOME", path.join(root, "gemini"));
+		stubEnv("FAKE_AGENT_CONVERSATIONS", sids);
+		return {
+			files: () => fs.readdirSync(conversations).sort(),
+			token: () => fs.existsSync(path.join(acp, "acp_token.json")),
+		};
+	}
+	const userFiles = [".db", ".db-shm", ".db-wal", ".meta"].map((suffix) => userSid + suffix).sort();
+	afterEach(() => { unstubAllEnvs(); });
+
+	it("removes the conversation a quota read creates and nothing else", async () => {
+		const { root, runtime, connections } = setup();
+		const store = conversationsIn(root);
+		expect((await runtime.quota(undefined)).groups).toHaveLength(3);
+		await connections[0]!.process.exited;
+		expect(store.files()).toEqual(userFiles);
+		expect(store.token()).toBe(true);
+	});
+
+	it("keeps the conversation of a user turn", async () => {
+		const { root, runtime, connections } = setup();
+		const store = conversationsIn(root);
+		expect((await turn(runtime, [user("hello")])).stopReason).toBe("stop");
+		const afterTurn = store.files();
+		expect(afterTurn).toHaveLength(8);
+		await runtime.quota(undefined);
+		await connections.at(-1)!.process.exited;
+		expect(store.files()).toEqual(afterTurn);
+	});
+
+	it("deletes nothing for a session id that is not a UUID", async () => {
+		const { root, runtime, connections } = setup();
+		const store = conversationsIn(root, "plain");
+		await runtime.quota(undefined);
+		await connections[0]!.process.exited;
+		expect(store.files()).toEqual([...userFiles, "fake-session.db", "fake-session.db-shm", "fake-session.db-wal", "fake-session.meta"].sort());
 	});
 });

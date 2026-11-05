@@ -54,7 +54,7 @@ describe("SDK 2 app migration over ACP v1", () => {
 		const response = await connection.prompt({ sessionId: session.sessionId, prompt: [{ type: "text", text: "hello" }] });
 		expect(response.usage).toMatchObject({ inputTokens: 17, outputTokens: 5, cachedReadTokens: 3, thoughtTokens: 2 });
 		// omp records thinking tokens as `reasoningTokens` (a subset of output).
-		expect(usageFromPrompt(response)).toMatchObject({ input: 14, output: 5, cacheRead: 3, reasoningTokens: 2, totalTokens: 22 });
+		expect(usageFromPrompt(response)).toMatchObject({ input: 14, output: 7, cacheRead: 3, reasoningTokens: 2, totalTokens: 24 });
 		expect(quotaFromPrompt(response)).toEqual({ remaining: 12, limit: 20 });
 	});
 

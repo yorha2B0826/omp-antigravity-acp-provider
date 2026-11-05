@@ -153,13 +153,21 @@ describe("usageFromPrompt", () => {
 		});
 		expect(usage).toMatchObject({
 			input: 15,
-			output: 8,
+			output: 11,
 			cacheRead: 5,
 			cacheWrite: 2,
 			// omp's `Usage` names thinking tokens `reasoningTokens` (a subset of `output`).
 			reasoningTokens: 3,
-			totalTokens: 30,
+			totalTokens: 33,
 		});
+	});
+
+	it("matches agy 1.4.3 totals: input includes cached tokens, output excludes thoughts", () => {
+		const usage = usageFromPrompt({
+			stopReason: "end_turn",
+			usage: { inputTokens: 128638, cachedReadTokens: 79242, outputTokens: 219, thoughtTokens: 12249, totalTokens: 141106 },
+		});
+		expect(usage).toMatchObject({ input: 49396, cacheRead: 79242, output: 12468, reasoningTokens: 12249, totalTokens: 141106 });
 	});
 
 	it("extracts quota metadata when the server supplies it", () => {

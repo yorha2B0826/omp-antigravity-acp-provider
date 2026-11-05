@@ -3,6 +3,7 @@ import { configDefaults, defineConfig } from "vitest/config";
 export default defineConfig({
 	test: {
 		include: ["test/**/*.test.ts"],
+		globalSetup: ["test/support/isolate-home.ts"],
 		// omp port: these suites import @oh-my-pi host packages whose module
 		// initialization touches the Bun global (e.g. `Bun.env` in pi-utils) and
 		// whose entries are raw TypeScript — vitest workers run under Node, where

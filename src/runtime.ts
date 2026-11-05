@@ -26,6 +26,7 @@ import { createHash } from "node:crypto";
 import {
 	clearAntigravityCredentials,
 	inspectAntigravityAuth,
+	removeConversation,
 	type AntigravityAuthHealth,
 } from "./acp/antigravity.js";
 import { AntigravityAcpConnection, type AntigravityConnectionOptions } from "./acp/connection.js";
@@ -33,6 +34,7 @@ import { abortError, AntigravityAcpError, errorMessage } from "./acp/errors.js";
 import { quotaExhaustion } from "./acp/quota.js";
 import { AcpSessionStore } from "./acp/session-store.js";
 import { sessionModels, sessionModes, type AcpModelInfo, type AcpNewSessionResponse, type SessionState } from "./acp/session-state.js";
+import { parseUsageQuota, type AntigravityQuotaSnapshot } from "./acp/usage-quota.js";
 import {
 	MANAGED_AUTH_MARKER,
 	PERMISSION_RESULT_KIND,
@@ -63,6 +65,8 @@ import { RuntimeMetrics } from "./status.js";
 
 const PERMISSION_TIMEOUT_MS = 120_000;
 const TOOL_BATCH_MS = 100;
+const QUOTA_CACHE_MS = 60_000;
+const QUOTA_TIMEOUT_MS = 30_000;
 
 type AntigravityModel = AcpModel;
 
@@ -97,6 +101,9 @@ interface Binding {
 	writer: PiEventWriter | undefined;
 	permission: PendingPermission | undefined;
 	pendingTools: Map<string, PendingPiTool>;
+	/** Latest `usage_update.used` and the inference count of the running ACP prompt. */
+	contextUsed: number | undefined;
+	inferences: number;
 	toolBatchTimer: ReturnType<typeof setTimeout> | undefined;
 	bridge: PiMcpBridge | undefined;
 	toolFingerprint: string;
@@ -165,6 +172,8 @@ export class AntigravityRuntime {
 	private readonly sessionStore: AcpSessionStore | undefined;
 	private readonly metrics = new RuntimeMetrics();
 	private permissionMode: PermissionMode;
+	private quotaCache: AntigravityQuotaSnapshot | undefined;
+	private quotaInFlight: { epoch: number; snapshot: Promise<AntigravityQuotaSnapshot> } | undefined;
 
 	constructor(
 		connectionFactory?: AntigravityConnectionFactory,
@@ -228,6 +237,69 @@ export class AntigravityRuntime {
 			return sessionModels(session)?.availableModels ?? [];
 		} finally {
 			await connection.close();
+		}
+	}
+
+	/** Live quota from agy's own `/usage`, which answers without model inference. */
+	async quota(apiKey: string | undefined, signal?: AbortSignal): Promise<AntigravityQuotaSnapshot> {
+		this.assertActive();
+		if (signal?.aborted) throw abortError();
+		if (this.quotaCache && Date.now() - this.quotaCache.at < QUOTA_CACHE_MS) return this.quotaCache;
+		const epoch = this.bindingEpoch;
+		if (this.quotaInFlight?.epoch !== epoch) {
+			const request = {
+				epoch,
+				snapshot: this.fetchQuota(apiKey)
+					.then((snapshot) => {
+						if (this.bindingEpoch === epoch) this.quotaCache = snapshot;
+						return snapshot;
+					})
+					.finally(() => { if (this.quotaInFlight === request) this.quotaInFlight = undefined; }),
+			};
+			this.quotaInFlight = request;
+		}
+		const shared = this.quotaInFlight.snapshot;
+		if (!signal) return shared;
+		// One caller's abort must not cancel the request other callers share.
+		return new Promise((resolve, reject) => {
+			const onAbort = () => reject(abortError());
+			signal.addEventListener("abort", onAbort, { once: true });
+			shared.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+		});
+	}
+
+	// A separate short-lived process, never a user's warm session, so `/usage` cannot race user turns.
+	private async fetchQuota(apiKey: string | undefined): Promise<AntigravityQuotaSnapshot> {
+		this.assertActive();
+		const epoch = this.bindingEpoch;
+		if (this.ensureAgent) await ensureAntigravityAcpReady();
+		this.assertEpoch(epoch);
+		let sessionId: string | undefined;
+		let text = "";
+		const connection = this.createConnection({
+			cwd: process.cwd(),
+			promptIdleTimeoutMs: QUOTA_TIMEOUT_MS,
+			handlers: {
+				onUpdate: ({ sessionId: id, update }) => {
+					if (id === sessionId && update.sessionUpdate === "agent_message_chunk" && update.content.type === "text") text += update.content.text;
+				},
+				onPermission: async () => ({ outcome: { outcome: "cancelled" } }),
+			},
+		});
+		try {
+			const initialize = await connection.initialize();
+			this.assertEpoch(epoch);
+			await authenticateForCredential(connection, initialize, apiKey);
+			this.assertEpoch(epoch);
+			sessionId = (await connection.newSession(process.cwd())).sessionId;
+			this.assertEpoch(epoch);
+			// agy answers a bare "/usage" text block itself: no model turn, no quota spent.
+			await connection.prompt({ sessionId, prompt: [{ type: "text", text: "/usage" }] });
+			return parseUsageQuota(text);
+		} finally {
+			await connection.close();
+			// agy keeps no index and offers no delete RPC; remove the files only once the process is gone (close() can give up on a process that ignored SIGKILL).
+			if (sessionId && !connection.process.alive) removeConversation(sessionId);
 		}
 	}
 
@@ -331,6 +403,7 @@ export class AntigravityRuntime {
 
 	async logout(): Promise<void> {
 		await this.closeBindings();
+		this.quotaCache = undefined;
 		this.sessionStore?.clear();
 		clearAntigravityCredentials();
 	}
@@ -584,6 +657,8 @@ export class AntigravityRuntime {
 			binding.needsReconstruction = false;
 			binding.pendingContextCount = context.messages.length;
 			binding.pendingContextFingerprint = messagesFingerprint(context.messages);
+			binding.contextUsed = undefined;
+			binding.inferences = 0;
 			binding.turnCompletion = new Promise<void>((resolve) => {
 				completeTurn = resolve;
 			});
@@ -601,7 +676,6 @@ export class AntigravityRuntime {
 			const activeWriter = binding.writer ?? writer;
 			if (binding.abortRequested) throw abortError();
 			const usage = usageFromPrompt(response);
-			activeWriter.message.usage = usage;
 			this.metrics.record(response, usage);
 			// agy reports exhaustion as an ordinary reply; fail it before the turn is persisted.
 			const quota = usage.totalTokens === 0 || response.stopReason === "refusal"
@@ -611,6 +685,16 @@ export class AntigravityRuntime {
 				throw new AntigravityAcpError("quota",
 					`Antigravity quota exceeded for ${binding.modelId}.${quota.resetAt ? ` Resets at ${quota.resetAt}.` : ""}`);
 			}
+			if (binding.contextUsed !== undefined) {
+				// Pi sizes the context from the last message's totalTokens, but the response sums every
+				// inference. agy adds cache reads to `used` twice; with one inference the response's cache
+				// count is that inference's, so subtracting it is exact. Longer prompts with cache reads
+				// still overcount by the last inference's cached tokens.
+				activeWriter.message.usage = {
+					...usage,
+					totalTokens: binding.inferences === 1 ? Math.max(0, binding.contextUsed - usage.cacheRead) : binding.contextUsed,
+				};
+			} else activeWriter.message.usage = usage;
 			activeWriter.message.rawStopReason = response.stopReason;
 			binding.messageCount = binding.pendingContextCount || parts.messageCount;
 			binding.historyFingerprint = binding.pendingContextFingerprint;
@@ -798,6 +882,8 @@ export class AntigravityRuntime {
 				writer,
 				permission: undefined,
 				pendingTools: new Map(),
+				contextUsed: undefined,
+				inferences: 0,
 				toolBatchTimer: undefined,
 				bridge,
 				toolFingerprint: piToolFingerprint(tools),
@@ -915,6 +1001,11 @@ export class AntigravityRuntime {
 			if (activity.type === "text") binding.writer.text(activity.delta);
 			else if (activity.type === "thought") binding.writer.thinking(activity.delta);
 			else if (activity.type === "tool" || activity.type === "plan") binding.writer.thinking(activity.text);
+			else if (activity.type === "usage") {
+				binding.contextUsed = activity.used;
+				binding.inferences += 1;
+				if (!binding.writer.finished) binding.writer.message.usage.totalTokens = activity.used;
+			}
 		}
 	}
 

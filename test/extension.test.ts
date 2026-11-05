@@ -3,8 +3,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AntigravityAcpConnection } from "../src/acp/connection.js";
+import { AntigravityAcpError } from "../src/acp/errors.js";
+import { parseUsageQuota } from "../src/acp/usage-quota.js";
+import { QUOTA_REQUEST_CHANNEL } from "../src/constants.js";
 import { PERMISSION_TOOL_NAME } from "../src/runtime.js";
 import type { PromptContext } from "../src/stream/context.js";
 import {
@@ -16,6 +19,8 @@ import {
 } from "./helpers/fake-extension-api.js";
 
 const fakeAgent = fileURLToPath(new URL("./fixtures/fake-agent.mjs", import.meta.url));
+const usageReply = fs.readFileSync(new URL("./fixtures/usage-reply.md", import.meta.url), "utf8");
+const now = 1_800_000_000_000;
 // omp materializes `identity`/`compat` on top of these catalog fields; the
 // provider only reads the catalog inputs, so the literal is re-typed once.
 const model = { id: "gemini-test", name: "Test", api: "antigravity-acp", provider: "antigravity-acp", baseUrl: "", reasoning: false, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 1000000, maxTokens: 8192 } as unknown as Model<"antigravity-acp">;
@@ -52,16 +57,18 @@ afterEach(async () => {
 	else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
 	if (previousHome === undefined) delete process.env.HOME;
 	else process.env.HOME = previousHome;
+	vi.restoreAllMocks();
 	fs.rmSync(root, { recursive: true, force: true });
 });
 
 // Pi loads each extension instance with a fresh module graph. Bun's runner has
 // no `vi.resetModules`, so each load imports a distinguishable module URL.
 let instance = 0;
-async function load(sessionId: string) {
+async function load(sessionId: string, events?: FakeExtensionApi["api"]["events"]) {
 	const specifier = new URL(`../extensions/index.js?instance=${++instance}`, import.meta.url).href;
 	const { registerAntigravityAcp } = (await import(specifier)) as typeof import("../extensions/index.js");
 	const pi = createFakeExtensionApi(registry);
+	if (events) pi.api.events = events;
 	registerAntigravityAcp(pi.api, (options) => {
 		const connection = new AntigravityAcpConnection({ ...options, command: process.execPath,
 			args: [fakeAgent], env: { ...process.env, FAKE_AGENT_LOG_FILE: log } });
@@ -71,6 +78,25 @@ async function load(sessionId: string) {
 	const ctx = createFakeContext({ sessionId, cwd: root });
 	loaded.push({ pi, ctx });
 	return { pi, ctx };
+}
+
+// load() imports a fresh module graph; spy on that graph's runtime class.
+async function spyQuota() {
+	const { AntigravityRuntime } = await import("../src/runtime.js");
+	return vi.spyOn(AntigravityRuntime.prototype, "quota");
+}
+
+// Bun's runner has no `vi.waitFor`, so poll the assertion until it settles.
+async function waitFor(assertion: () => void) {
+	for (let attempt = 0; attempt < 100; attempt++) {
+		try {
+			assertion();
+			return;
+		} catch {
+			await new Promise((resolve) => setTimeout(resolve, 10));
+		}
+	}
+	assertion();
 }
 
 function stream(messages: PromptContext["messages"], sessionId: string, provider = registry.get("antigravity-acp")) {
@@ -140,5 +166,138 @@ describe("extension entry point", () => {
 		for (const { pi, ctx } of loaded.splice(0)) await pi.emit("session_shutdown", { reason: "quit" }, ctx);
 
 		expect(connections.every((connection) => !connection.process.alive)).toBe(true);
+	});
+
+	it("reports process token totals without counting reasoning twice", async () => {
+		const { pi, ctx } = await load("parent");
+		await stream([user("usage single")], "parent");
+		await pi.commands.get("antigravity-acp")!.handler("quota", ctx as never);
+		// Thought tokens are already part of output, so tokens= is input + output + cacheRead + cacheWrite.
+		expect(ctx.ui.notify.mock.calls.at(-1)![0]).toContain(
+			"Usage this process: turns=1 tokens=1200 input=600 output=200 reasoning=50 cacheRead=400",
+		);
+	});
+});
+
+describe("live quota", () => {
+	it("shows the live quota above the process totals", async () => {
+		const snapshot = parseUsageQuota(usageReply, now);
+		const { pi, ctx } = await load("a");
+		const quota = (await spyQuota()).mockResolvedValue(snapshot);
+
+		await pi.commands.get("antigravity-acp")!.handler("quota", ctx as never);
+		expect(quota).toHaveBeenCalled();
+		expect(ctx.ui.notify).toHaveBeenCalledWith(
+			expect.stringContaining("Gemini Models: weekly 75% (resets 2026-01-12T18:00:00.000Z), 5h 90% (resets 2026-01-08T04:30:00.000Z)"),
+			"info",
+		);
+		expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("Usage this process: turns=0"), "info");
+		expect(ctx.ui.notify.mock.calls[0]![0]).not.toContain("not supplied");
+	});
+
+	it("labels groups without percentages as no percentage limits reported", async () => {
+		const snapshot = {
+			at: now,
+			groups: [{ displayName: "Other", buckets: [] }],
+		};
+		const { pi, ctx } = await load("a");
+		(await spyQuota()).mockResolvedValue(snapshot);
+
+		await pi.commands.get("antigravity-acp")!.handler("quota", ctx as never);
+
+		expect(ctx.ui.notify).toHaveBeenCalledWith(
+			expect.stringContaining("Other: no percentage limits reported"),
+			"info",
+		);
+	});
+
+	it("shows why the live quota is unavailable", async () => {
+		const { pi, ctx } = await load("a");
+		(await spyQuota()).mockRejectedValue(
+			new AntigravityAcpError("protocol", "Antigravity /usage reply had no quota groups: Unable to retrieve quota status (backend unavailable)"),
+		);
+
+		await pi.commands.get("antigravity-acp")!.handler("quota", ctx as never);
+
+		const text = ctx.ui.notify.mock.calls.at(-1)![0] as string;
+		expect(text).toContain("Antigravity quota: unavailable (");
+		expect(text).toContain("Unable to retrieve quota status");
+	});
+
+	it("replies once with the live quota snapshot", async () => {
+		const snapshot = parseUsageQuota(usageReply, now);
+		const { pi } = await load("a");
+		(await spyQuota()).mockResolvedValue(snapshot);
+
+		const reply = vi.fn();
+		pi.api.events.emit(QUOTA_REQUEST_CHANNEL, { reply });
+
+		await waitFor(() => expect(reply).toHaveBeenCalledTimes(1));
+		expect(reply).toHaveBeenCalledWith({ ok: true, quota: snapshot });
+	});
+
+	it("replies once with an error when the quota cannot be read", async () => {
+		const { pi } = await load("a");
+		(await spyQuota()).mockRejectedValue(
+			new AntigravityAcpError("protocol", "Antigravity /usage reply had no quota groups: Unable to retrieve quota status (backend unavailable)"),
+		);
+
+		let callCount = 0;
+		const reply = vi.fn(() => {
+			callCount++;
+			if (callCount === 1) throw new Error("listener error");
+		});
+
+		pi.api.events.emit(QUOTA_REQUEST_CHANNEL, { reply });
+
+		await waitFor(() => expect(reply).toHaveBeenCalledTimes(1));
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		expect(reply).toHaveBeenCalledTimes(1);
+		expect(reply).toHaveBeenCalledWith({
+			ok: false,
+			error: expect.stringContaining("Unable to retrieve quota status"),
+		});
+	});
+
+	it("replies once when several instances share one event bus", async () => {
+		const snapshot = parseUsageQuota(usageReply, now);
+		const parent = await load("a");
+		// Both instances share the runtime built by the first module graph.
+		(await spyQuota()).mockResolvedValue(snapshot);
+		const child = await load("b", parent.pi.api.events);
+
+		const reply = vi.fn();
+		parent.pi.api.events.emit(QUOTA_REQUEST_CHANNEL, { reply });
+
+		await waitFor(() => expect(reply).toHaveBeenCalledTimes(1));
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(reply).toHaveBeenCalledTimes(1);
+		expect(reply).toHaveBeenCalledWith({ ok: true, quota: snapshot });
+
+		// The surviving instance still answers once the other one stops listening.
+		await child.pi.emit("session_shutdown", { reason: "reload" }, child.ctx);
+		const next = vi.fn();
+		parent.pi.api.events.emit(QUOTA_REQUEST_CHANNEL, { reply: next });
+		await waitFor(() => expect(next).toHaveBeenCalledTimes(1));
+	});
+
+	it("ignores requests without a reply function", async () => {
+		const { pi } = await load("a");
+		const quota = (await spyQuota()).mockResolvedValue({ at: 0, groups: [] });
+
+		pi.api.events.emit(QUOTA_REQUEST_CHANNEL, {});
+		pi.api.events.emit(QUOTA_REQUEST_CHANNEL, { reply: "not-a-function" });
+
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(quota).not.toHaveBeenCalled();
+	});
+
+	it("stops listening on session shutdown", async () => {
+		const { pi, ctx } = await load("a");
+		expect(pi.listeners.get(QUOTA_REQUEST_CHANNEL)).toHaveLength(1);
+
+		await pi.emit("session_shutdown", { reason: "reload" }, ctx);
+
+		expect(pi.listeners.get(QUOTA_REQUEST_CHANNEL)).toHaveLength(0);
 	});
 });
