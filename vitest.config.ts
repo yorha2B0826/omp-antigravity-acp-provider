@@ -20,6 +20,7 @@ export default defineConfig({
 			"test/runtime-safety.test.ts",
 			"test/model-selection.integration.test.ts",
 			"test/extension.test.ts",
+			"test/late-tool-result.test.ts",
 		],
 		testTimeout: 10_000,
 	},

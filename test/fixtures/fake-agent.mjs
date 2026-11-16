@@ -197,16 +197,30 @@ for await (const line of rl) {
 		send({ jsonrpc: "2.0", id, result: {} });
 	} else if (method === "session/prompt") {
 		const text = params.prompt.filter((block) => block.type === "text").map((block) => block.text).join("\n");
+		// agy runs these slash commands itself instead of prompting the model.
+		const joined = params.prompt.filter((block) => block.type === "text").map((block) => block.text).join("").trim();
+		const slash = joined === "/logout" ? "logout" : /^\/usage(?:\s|$)/iu.test(joined) ? "usage"
+			: params.prompt.some((block) => block.type === "text" && /(?:\s|^)\/plan(?:\s|$)/u.test(block.text)) ? "plan" : undefined;
+		if (slash) {
+			const reply = slash !== "usage"
+				? `Intercepted /${slash}`
+				: scenario === "usage-unavailable"
+					? "### Session Usage\n- **Session total:** data not available yet\n\n### Quota Limits\n- Unable to retrieve quota status (backend unavailable)"
+					: fs.readFileSync(new URL("./usage-reply.md", import.meta.url), "utf8");
+			send({ jsonrpc: "2.0", method: "session/update", params: { sessionId: params.sessionId, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: reply } } } });
+			send({ jsonrpc: "2.0", id, result: { stopReason: "end_turn" } });
+			continue;
+		}
 		// Handoffs carry the original request explicitly, but tell the agent not
 		// to repeat completed actions. Model that instruction rather than treating
 		// scenario keywords in the replayed request as a fresh tool invocation.
 		const continuing = params.prompt.some((block) => block.type === "text" && block.text.startsWith("Continue the current Pi user request"));
-		if (/^\/usage(?:\s|$)/iu.test(text.trim())) {
-			const reply = scenario === "usage-unavailable"
-				? "### Session Usage\n- **Session total:** data not available yet\n\n### Quota Limits\n- Unable to retrieve quota status (backend unavailable)"
-				: fs.readFileSync(new URL("./usage-reply.md", import.meta.url), "utf8");
-			send({ jsonrpc: "2.0", method: "session/update", params: { sessionId: params.sessionId, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: reply } } } });
-			send({ jsonrpc: "2.0", id, result: { stopReason: "end_turn" } });
+		if (continuing && scenario?.startsWith("late-")) {
+			const results = params.prompt.filter((block) => block.type === "resource").map((block) => block.resource.text).join("\n");
+			send({ jsonrpc: "2.0", method: "session/update", params: { sessionId: params.sessionId,
+				update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: results } } } });
+			if (scenario === "late-hang") hangingPromptId = id;
+			else send({ jsonrpc: "2.0", id, result: { stopReason: "end_turn" } });
 			continue;
 		}
 		if (scenario === "mode-drift" || scenario === "config-options-mode-drift") {
@@ -238,6 +252,7 @@ for await (const line of rl) {
 		const usageUpdate = (used) => notify({ sessionUpdate: "usage_update", used, size: 1048576 });
 		if (!continuing && text.includes("bridge") && mcpServer) {
 			bridgePromptId = id;
+			finishBeforePiResult(id);
 			const reportUsage = text.includes("usage");
 			if (reportUsage) { usageUpdate(0); usageUpdate(1000); }
 			const invocation = text.includes("parallel")
@@ -285,6 +300,24 @@ for await (const line of rl) {
 				...(text.includes("refusal") || text.includes("quoted") ? { usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 } } : {}) } });
 			continue;
 		}
+		if (text.startsWith("usage multi")) {
+			const used = text.includes("overflow") ? 1100000 : text.includes("boundary") ? 1000000 : 270000;
+			const inputs = [270000, 270000, 270000, used];
+			const cachedReadTokens = text.includes("cached") ? 720000 : 0;
+			usageUpdate(0);
+			for (const context of inputs) usageUpdate(context);
+			notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Done" } });
+			send({ jsonrpc: "2.0", id, result: { stopReason: "end_turn",
+				usage: { inputTokens: inputs.reduce((sum, context) => sum + context - 1000, 0),
+					cachedReadTokens, outputTokens: 4000, totalTokens: inputs.reduce((sum, context) => sum + context, 0) } } });
+			continue;
+		}
+		if (text === "usage overflow error") {
+			usageUpdate(270000);
+			send({ jsonrpc: "2.0", id, error: { code: -32603,
+				message: "The input token count (1100000) exceeds the maximum number of tokens allowed (1000000)" } });
+			continue;
+		}
 		if (text === "usage single") {
 			usageUpdate(1600);
 			notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Hello" } });
@@ -298,6 +331,7 @@ for await (const line of rl) {
 		}
 		if (!continuing && text.includes("permission")) {
 			permissionPromptId = id;
+			finishBeforePiResult(id);
 			send({
 				jsonrpc: "2.0",
 				id: "permission-1",
@@ -343,6 +377,18 @@ for await (const line of rl) {
 	} else {
 		send({ jsonrpc: "2.0", id, error: { code: -32601, message: `Unknown method ${method}` } });
 	}
+}
+
+function finishBeforePiResult(id) {
+	if (!scenario?.startsWith("late-")) return;
+	// The real runtime's MCP deadline can expire while Pi is still executing the tool.
+	setTimeout(() => {
+		bridgePromptId = undefined;
+		permissionPromptId = undefined;
+		send({ jsonrpc: "2.0", id, ...(scenario === "late-error"
+			? { error: { code: -32603, message: "Prompt ended before the Pi result" } }
+			: { result: { stopReason: "end_turn" } }) });
+	}, 350);
 }
 
 function sessionModes(restored = false) {
