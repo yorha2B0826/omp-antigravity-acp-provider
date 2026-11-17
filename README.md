@@ -23,7 +23,8 @@ server, targeting **Oh My Pi (omp)**. The package also still loads under upstrea
 
 - Registers `antigravity-acp/*` models backed by Google Antigravity.
 - Uses ACP protocol v1 and the official TypeScript SDK.
-- Collapses Antigravity's effort-qualified IDs into one entry per model; Pi's Shift+Tab reasoning control selects low/medium/high dynamically.
+- Collapses Antigravity's effort-qualified IDs into one entry per model; Pi's Shift+Tab reasoning control selects low/medium/high and, where advertised, xhigh dynamically.
+- Estimates token costs from known model-family catalog rates; these are reference estimates, not Antigravity subscription charges.
 - Supports Pi streaming, cancellation, usage/quota metadata, lifecycle cleanup, and persisted ACP session restoration across Pi restarts.
 - Routes compatible Pi tools through an authenticated loopback MCP bridge; doctor/status names omitted tools and their reasons.
 - Supports persisted `default`, `auto-edit`, and `yolo` Antigravity permission modes. The requested default is `yolo`; switching to a prompting mode retains the single-use, fail-closed Pi permission broker.
@@ -108,9 +109,10 @@ On macOS the Antigravity server keeps the consumer token in the login keychain (
 /antigravity-acp permissions default
 /antigravity-acp permissions auto-edit
 /antigravity-acp permissions yolo
+/antigravity-acp tool-activity [off|compact|full]
 ```
 
-Permission and runtime-update modes are saved in `$PI_CODING_AGENT_DIR/antigravity-acp-provider/config.json` (where `PI_CODING_AGENT_DIR` defaults to `~/.pi/agent`). Runtime updates default to `automatic`; only provider-managed installations are replaced. ACP session bindings are saved beside the config in `sessions.json`.
+Permission, runtime-update, and tool-activity modes are saved in `$PI_CODING_AGENT_DIR/antigravity-acp-provider/config.json` (where `PI_CODING_AGENT_DIR` defaults to `~/.pi/agent`). Runtime updates default to `automatic` (only provider-managed installations are replaced), and `toolActivity` defaults to `compact` (one line per Antigravity `tool_call` start; `off` hides them, `full` includes all updates and details). ACP session bindings are saved beside the config in `sessions.json`.
 
 On first use of a custom profile without a config, existing permission/update settings are copied from the default agent directory (or the legacy Gemini-provider config). Existing custom configs are never overwritten, and saved sessions are not copied. **Custom Pi profiles do not isolate Antigravity accounts or managed runtimes:** Antigravity's OAuth credentials and runtime installation remain in their shared locations.
 
@@ -147,11 +149,14 @@ Prompts are bounded by inactivity, not total turn duration: streaming progress r
 
 Antigravity 1.4.5 also has its own three-minute MCP call deadline, independent of the provider's watchdog. If the ACP prompt ends while Pi is still executing a tool, the provider releases the abandoned ACP requests. A late Pi result is then included in a new prompt instead of leaving Pi waiting on an already-ended continuation; cancellation remains available. This recovery does not extend Antigravity's MCP deadline.
 
+Warm ACP bindings are bounded by a default capacity of four and a five-minute idle expiry. Active prompts and parked tool/permission requests are not evicted; saved session records remain available for later restoration.
+
 System instructions are kept outside truncated conversation history. Instructions larger than 256 KiB UTF-8 fail clearly rather than being silently shortened. ACP has no mid-prompt system-update RPC: an instruction change received with tool/permission results finishes the existing prompt under its original instructions, then forces reconstruction before the next prompt. Such a stale binding is not persisted for restoration.
 
 When Antigravity reports that the account's quota is exhausted, the turn ends with `stopReason: "error"` and `Antigravity quota exceeded for <model>. Resets at <ISO 8601 time>.` (the reset part is omitted when Antigravity gives none). Pi does not retry quota errors automatically. The failed turn is not saved, and the ACP session stays warm for the next prompt.
 
 A user message such as `/plan`, `/usage` or `/logout` reaches the model as text: the provider puts an invisible U+200B before those three commands (and before any slash that starts the message) so the Antigravity server does not run them. Other slashes, such as paths, are left untouched. The marker is removed before the model sees the text.
+The model path can also refuse requests with HTTP 429 `RESOURCE_EXHAUSTED` (rate limit or entitlement) while plan usage looks healthy. Antigravity then retries with backoff indefinitely, logging only to stderr. The provider tolerates two such retries per inference and 15 seconds of announced retry delay in total. The third retry, announced delays beyond that budget, or silence lasting 30 seconds past a retry's announced delay without model progress fail the turn with a `quota` error that reports the retry count and next delay and suggests retrying later or switching provider. The message starts with `Antigravity quota exceeded`, so Pi does not retry it automatically. The agent process is then closed, as after an inactivity timeout, so the retry loop stops and the next prompt starts a fresh one.
 
 ## Security boundary
 
@@ -159,7 +164,7 @@ This launches a full coding agent with the user's OS privileges. **The default `
 
 ## Compatibility
 
-The current development tree is tested with Pi 1.5.0 and requires Node.js 22.19.0 or newer; development is pinned to Pi 1.5.0, ACP SDK 2.2.0, and ACP protocol 1. The provider uses the SDK's `client()` app API and explicitly selects its full-v1 `/unstable` entrypoint for draft prompt usage and session lifecycle features. It supports stable session configuration options and retains compatibility with older Antigravity model-selection metadata; it does not enable experimental ACP v2. See [the SDK migration notes](docs/ACP-SDK-MIGRATION.md). Upgrade Pi before upgrading from provider 0.1.12. Pi supplies the host packages at runtime, so their peer ranges remain `*` as required by Pi's package contract; this is not a promise of compatibility with every Pi version. Transcript system instructions and tool additions/removals are replayed into ACP checkpoints, replacing stale warm sessions when that state changes. The bundled signed catalog approves Antigravity ACP releases through 1.4.5 and can accept newer signed catalog releases without an npm update. ACP session setup allows up to two minutes for slow first-run initialization, while transport shutdown rejects pending requests immediately. The current official registry and signed catalog provide Linux x64/ARM64, Windows x64/ARM64, and macOS Intel/ARM64 artifacts. Intel macOS artifacts exist, but the proposed local re-signing workaround is not enabled or qualified by this package. Alpine/musl is rejected because Google's Linux build targets glibc.
+The current development tree is tested with Pi 1.5.2 and requires Node.js 22.19.0 or newer; development is pinned to Pi 1.5.2, ACP SDK 2.6.0, and ACP protocol 1. The provider uses the SDK's `client()` app API and explicitly selects its full-v1 `/unstable` entrypoint for draft prompt usage and session lifecycle features. It supports stable session configuration options and retains compatibility with older Antigravity model-selection metadata; it does not enable experimental ACP v2. See [the SDK migration notes](docs/ACP-SDK-MIGRATION.md). Upgrade Pi before upgrading from provider 0.1.12. Pi supplies the host packages at runtime, so their peer ranges remain `*` as required by Pi's package contract; this is not a promise of compatibility with every Pi version. Transcript system instructions and tool additions/removals are replayed into ACP checkpoints, replacing stale warm sessions when that state changes. The bundled signed catalog approves Antigravity ACP releases through 1.5.0 and can accept newer signed catalog releases without an npm update. ACP session setup allows up to two minutes for slow first-run initialization, while transport shutdown rejects pending requests immediately. The current official registry and signed catalog provide Linux x64/ARM64, Windows x64/ARM64, and macOS Intel/ARM64 artifacts. Intel macOS artifacts exist, but the proposed local re-signing workaround is not enabled or qualified by this package. Alpine/musl is rejected because Google's Linux build targets glibc.
 
 During browser authentication, Chromium may write `Opening in existing browser session.` to the ACP process's inherited stdout. The transport ignores only that exact known compatibility line and reports its count in `doctor`; all other non-JSON stdout remains a fatal protocol error.
 

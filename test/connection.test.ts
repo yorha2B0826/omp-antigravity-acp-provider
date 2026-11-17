@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 
 import { AntigravityAcpConnection } from "../src/acp/connection.js";
+import { AntigravityAcpError } from "../src/acp/errors.js";
 import { findSessionSelector, sessionModels, sessionModes } from "../src/acp/session-state.js";
 
 const fakeAgent = fileURLToPath(new URL("./fixtures/fake-agent.mjs", import.meta.url));
@@ -19,6 +20,51 @@ describe("AntigravityAcpConnection", () => {
 				agentInfo: { name: "fake-gemini" },
 			});
 			expect(connection.process.ignoredStdoutNoiseLines).toBe(1);
+		} finally {
+			await connection.close();
+		}
+	});
+
+	it("marks the connection closed immediately upon close() even while the child process is alive", async () => {
+		const connection = new AntigravityAcpConnection({
+			cwd: path.dirname(fakeAgent),
+			command: process.execPath,
+			args: [fakeAgent],
+		});
+		const realClose = connection.process.close.bind(connection.process);
+		let releaseClose!: () => void;
+		const closeGate = new Promise<void>((resolve) => {
+			releaseClose = resolve;
+		});
+		connection.process.close = async () => {
+			await closeGate;
+			await realClose();
+		};
+		try {
+			await connection.initialize();
+			expect(connection.closed).toBe(false);
+			const closing = connection.close();
+			expect(connection.closed).toBe(true);
+			expect(connection.process.alive).toBe(true);
+			releaseClose();
+			await closing;
+			expect(connection.process.alive).toBe(false);
+		} finally {
+			releaseClose?.();
+			await realClose();
+		}
+	});
+
+	it("marks the connection closed on protocol error", async () => {
+		const connection = new AntigravityAcpConnection({
+			cwd: path.dirname(fakeAgent),
+			command: process.execPath,
+			args: [fakeAgent, "malformed-output"],
+			initializeTimeoutMs: 5_000,
+		});
+		try {
+			await expect(connection.initialize()).rejects.toThrow("malformed JSON");
+			expect(connection.closed).toBe(true);
 		} finally {
 			await connection.close();
 		}
@@ -207,6 +253,121 @@ describe("AntigravityAcpConnection", () => {
 			expect(connection.process.alive).toBe(true);
 			release(); release(); await rejection;
 		} finally { await connection.close(); }
+	});
+
+	it("surfaces redacted stderrTail on prompt watchdog and operation timeouts", async () => {
+		const connection = new AntigravityAcpConnection({
+			cwd: path.dirname(fakeAgent),
+			command: process.execPath,
+			args: [fakeAgent],
+			promptIdleTimeoutMs: 40,
+		});
+		try {
+			await connection.initialize();
+			const session = await connection.newSession(process.cwd());
+			connection.process.child.stderr.push(
+				"WARNING: System step error (HTTP 502): The model is currently unreachable. api_key=AIza1234567890abcdefghijkl\n",
+			);
+			const error = await connection.prompt({
+				sessionId: session.sessionId,
+				prompt: [{ type: "text", text: "hang" }],
+			}).catch((cause: unknown) => cause);
+			expect(error).toBeInstanceOf(Error);
+			expect((error as Error).message).toContain(
+				"Antigravity ACP session/prompt timed out: no progress for 40ms: WARNING: System step error (HTTP 502): The model is currently unreachable.",
+			);
+			expect((error as Error).message).toContain("<redacted>");
+			expect((error as Error).message).not.toContain("AIza1234567890abcdefghijkl");
+		} finally {
+			await connection.close();
+		}
+	});
+
+	describe("when agy silently retries 429 RESOURCE_EXHAUSTED", () => {
+		const exhaustedAgent = (stepMs = 20) => new AntigravityAcpConnection({ cwd: process.cwd(), command: process.execPath,
+			args: [fakeAgent, "resource-exhausted"], env: { ...process.env, FAKE_RETRY_STEP_MS: String(stepMs) } });
+		const prompt = (connection: AntigravityAcpConnection, sessionId: string, text: string, signal?: AbortSignal) =>
+			connection.prompt({ sessionId, prompt: [{ type: "text", text }] }, signal);
+
+		it("fails the prompt fast with a redacted quota error", async () => {
+			const connection = exhaustedAgent();
+			try {
+				const session = await connection.newSession(process.cwd());
+				const started = Date.now();
+				const error = await prompt(connection, session.sessionId, "Reply with exactly: PONG").catch((cause: unknown) => cause);
+				expect(Date.now() - started).toBeLessThan(2_000);
+				expect(error).toBeInstanceOf(AntigravityAcpError);
+				expect((error as AntigravityAcpError).code).toBe("quota");
+				expect((error as Error).message).toBe(
+					"Antigravity quota exceeded: the model path refused requests with HTTP 429 RESOURCE_EXHAUSTED (rate limit or entitlement); agy retried 3 times, next retry in 10.74s, without a reply. Retry later or switch to another provider.",
+				);
+				await connection.process.exited;
+				expect(connection.process.alive).toBe(false);
+				expect(connection.process.stderrTail).toContain("access_token=<redacted>");
+				expect(connection.process.stderrTail).not.toContain("ya29.fake-secret-access-token");
+			} finally { await connection.close(); }
+		});
+
+		it.each([
+			"retries 1",
+			"retries 2",
+			"retries 0 with the model name on stderr",
+			"echo Error 429, Message: Resource has been exhausted (e.g. check quota)., Status: RESOURCE_EXHAUSTED retries 0",
+		])("completes a turn that recovers: %s", async (text) => {
+			const updates: string[] = [];
+			const connection = exhaustedAgent();
+			connection.setHandlers({ onUpdate: (notification) => { updates.push(notification.update.sessionUpdate); } });
+			try {
+				const session = await connection.newSession(process.cwd());
+				expect((await prompt(connection, session.sessionId, text)).stopReason).toBe("end_turn");
+				expect(updates).toEqual(["agent_message_chunk"]);
+				expect(connection.process.alive).toBe(true);
+			} finally { await connection.close(); }
+		});
+
+		it("starts the retry count over once the model streams an update", async () => {
+			const updates: string[] = [];
+			const connection = exhaustedAgent();
+			connection.setHandlers({ onUpdate: (notification) => { updates.push(notification.update.sessionUpdate); } });
+			try {
+				const session = await connection.newSession(process.cwd());
+				expect((await prompt(connection, session.sessionId, "retries 2 progress")).stopReason).toBe("end_turn");
+				expect(updates).toEqual(["agent_thought_chunk", "agent_message_chunk"]);
+			} finally { await connection.close(); }
+		});
+
+		it("starts the retry count over once agy asks for permission", async () => {
+			const updates: string[] = [];
+			let permissions = 0;
+			const connection = exhaustedAgent();
+			connection.setHandlers({
+				onUpdate: (notification) => { updates.push(notification.update.sessionUpdate); },
+				onPermission: async () => { permissions++; return { outcome: { outcome: "selected", optionId: "allow-once" } }; },
+			});
+			try {
+				const session = await connection.newSession(process.cwd());
+				expect((await prompt(connection, session.sessionId, "retries 2 permission")).stopReason).toBe("end_turn");
+				expect(permissions).toBe(1);
+				expect(updates).toEqual(["agent_message_chunk"]);
+			} finally { await connection.close(); }
+		});
+
+		it("still cancels and closes an unresponsive agent within the abort grace", async () => {
+			const connection = exhaustedAgent(1_000);
+			const controller = new AbortController();
+			try {
+				const session = await connection.newSession(process.cwd());
+				const pending = prompt(connection, session.sessionId, "Reply with exactly: PONG", controller.signal);
+				await new Promise((resolve) => setTimeout(resolve, 1_100));
+				const started = Date.now();
+				controller.abort();
+				const error = await pending.catch((cause: unknown) => cause);
+				expect((error as AntigravityAcpError).code).toBe("aborted");
+				await connection.process.exited;
+				expect(Date.now() - started).toBeLessThan(3_500);
+				expect(connection.process.alive).toBe(false);
+			} finally { await connection.close(); }
+		});
 	});
 
 	it("rejects invalid inactivity options before starting a child", () => {

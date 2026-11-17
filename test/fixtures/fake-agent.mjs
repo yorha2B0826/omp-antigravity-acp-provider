@@ -22,6 +22,8 @@ let permissionPromptId;
 let hangingPromptId;
 let bridgePromptId;
 let mcpServer;
+// Set while the resource-exhausted scenario waits for the client to answer its permission request.
+let resumeAfterPermission;
 
 for await (const line of rl) {
 	if (!line.trim()) continue;
@@ -44,7 +46,10 @@ for await (const line of rl) {
 	const { id, method, params } = message;
 	if (process.env.FAKE_AGENT_LOG_FILE && method) fs.appendFileSync(process.env.FAKE_AGENT_LOG_FILE,
 		JSON.stringify({ method, ...(method === "initialize" ? { params } : {}), ...(method === "session/prompt" ? { prompt: params.prompt, mode } : {}), ...(method === "session/set_mode" ? { modeId: params.modeId } : {}) }) + "\n");
-	if (id === "permission-1" && method === undefined) {
+	if (id === "exhausted-permission" && method === undefined) {
+		resumeAfterPermission?.();
+		resumeAfterPermission = undefined;
+	} else if (id === "permission-1" && method === undefined) {
 		if (permissionPromptId === undefined) continue;
 		const decision = message.result?.outcome?.outcome ?? "cancelled";
 		send({
@@ -141,6 +146,14 @@ for await (const line of rl) {
 			for (const suffix of [".db", ".db-shm", ".db-wal"]) fs.writeFileSync(path.join(conversations, sessionId + suffix), "");
 			fs.writeFileSync(path.join(conversations, `${sessionId}.meta`), JSON.stringify({ cwd: params.cwd }));
 		}
+		if (process.env.FAKE_AGENT_WRITE_RUN_WORKFLOW === "1" && params.cwd) {
+			const skillDir = path.join(params.cwd, "skills", "system", "run-workflow");
+			const skillFile = path.join(skillDir, "SKILL.md");
+			if (!fs.existsSync(skillFile)) {
+				fs.mkdirSync(skillDir, { recursive: true });
+				fs.writeFileSync(skillFile, "# generated run-workflow\n");
+			}
+		}
 		mcpServer = params.mcpServers?.find((server) => server.type === "http");
 		send({
 			jsonrpc: "2.0",
@@ -214,7 +227,7 @@ for await (const line of rl) {
 		// Handoffs carry the original request explicitly, but tell the agent not
 		// to repeat completed actions. Model that instruction rather than treating
 		// scenario keywords in the replayed request as a fresh tool invocation.
-		const continuing = params.prompt.some((block) => block.type === "text" && block.text.startsWith("Continue the current Pi user request"));
+		const continuing = params.prompt.some((block) => block.type === "text" && block.text.includes("Continue the current Pi user request"));
 		if (continuing && scenario?.startsWith("late-")) {
 			const results = params.prompt.filter((block) => block.type === "resource").map((block) => block.resource.text).join("\n");
 			send({ jsonrpc: "2.0", method: "session/update", params: { sessionId: params.sessionId,
@@ -250,6 +263,28 @@ for await (const line of rl) {
 		const notify = (update) => send({ jsonrpc: "2.0", method: "session/update", params: { sessionId: params.sessionId, update } });
 		// agy reports the context size after each inference; setup sends used: 0.
 		const usageUpdate = (used) => notify({ sessionUpdate: "usage_update", used, size: 1048576 });
+		if (text === "emit tool activity") {
+			notify({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "Reasoning" } });
+			notify({
+				sessionUpdate: "plan",
+				entries: [{ content: "Inspect file", priority: "high", status: "in_progress" }],
+			});
+			notify({
+				sessionUpdate: "tool_call",
+				toolCallId: "tc-1",
+				title: "pi_echo",
+				kind: "other",
+				status: "in_progress",
+			});
+			notify({
+				sessionUpdate: "tool_call_update",
+				toolCallId: "tc-1",
+				status: "completed",
+			});
+			notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Done" } });
+			send({ jsonrpc: "2.0", id, result: { stopReason: "end_turn" } });
+			continue;
+		}
 		if (!continuing && text.includes("bridge") && mcpServer) {
 			bridgePromptId = id;
 			finishBeforePiResult(id);
@@ -264,7 +299,15 @@ for await (const line of rl) {
 							? invokeMcpTool(mcpServer, "second")
 							: new Promise((resolve) => setTimeout(resolve, 50)).then(() => invokeMcpTool(mcpServer, "second")),
 					]).then((results) => results.join(","))
-				: invokeMcpTool(mcpServer, "from gemini");
+				: invokeMcpTool(mcpServer, "from gemini", () => {
+					if (scenario !== "early-tool-turn-end") return;
+					setTimeout(() => {
+						if (bridgePromptId !== id) return;
+						bridgePromptId = undefined;
+						notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "MCP timed out" } });
+						send({ jsonrpc: "2.0", id, result: { stopReason: "end_turn" } });
+					}, 250);
+				});
 			void invocation.then(async (result) => {
 				if (text.includes("bridge delayed")) await new Promise((resolve) => setTimeout(resolve, 500));
 				if (bridgePromptId !== id) return;
@@ -280,7 +323,58 @@ for await (const line of rl) {
 				});
 				send({ jsonrpc: "2.0", id, result: { stopReason: "end_turn",
 					...(reportUsage ? { usage: { inputTokens: 2400, outputTokens: 200, totalTokens: 2600 } } : {}) } });
-			});
+			}).catch(() => undefined);
+			continue;
+		}
+		if (scenario === "resource-exhausted") {
+			// agy retries a model-path 429 with backoff and logs only to stderr: no update, no reply,
+			// and session/cancel is ignored. `retries N` recovers after N retries; with `progress`, the
+			// recovered inference streams an update and the next one retries N times again; with
+			// `permission`, it asks for permission instead, with no update before or after, and then
+			// retries N times again.
+			const retries = Number(/retries (\d+)/u.exec(text)?.[1] ?? Infinity);
+			const asksPermission = text.includes("permission");
+			const log = (line) => process.stderr.write(`I1114 22:07:04.512301 48213 local_connection.py:553] ${line}\n`);
+			log(`Starting inference with model gemini-4-hydrogen; access_token=ya29.fake-secret-access-token`);
+			if (text.includes("echo")) log(`prompt: ${text}`);
+			const delays = ["4s", "7.26s", "10.74s", "25.89s", "55.55s"];
+			let attempt = 0;
+			let progressed = !text.includes("progress") && !asksPermission;
+			let awaitingPermission = false;
+			const timer = setInterval(() => {
+				if (awaitingPermission) return;
+				if (attempt === retries && !progressed && asksPermission) {
+					awaitingPermission = true;
+					resumeAfterPermission = () => {
+						awaitingPermission = false;
+						progressed = true;
+						attempt = 0;
+					};
+					send({ jsonrpc: "2.0", id: "exhausted-permission", method: "session/request_permission", params: {
+						sessionId: params.sessionId,
+						toolCall: { toolCallId: "native-tool-1", title: "Run native command", kind: "execute" },
+						options: [{ optionId: "allow-once", name: "Allow once", kind: "allow_once" }],
+					} });
+					return;
+				}
+				if (attempt === retries && !progressed) {
+					notify({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "Thinking" } });
+					progressed = true;
+					attempt = 0;
+					return;
+				}
+				if (attempt < retries) {
+					// Split mid-line: stderr chunks do not follow line boundaries.
+					process.stderr.write("W1114 22:07:04.512301 48213 http_client.go:211] Error 429, Message: Resource has been ex");
+					process.stderr.write("hausted (e.g. check quota)., Status: RESOURCE_EXHAUSTED\n");
+					log(`planner_generator.go:359 Encountered retryable api error. retrying in ${delays[Math.min(attempt, delays.length - 1)]}`);
+					attempt++;
+					return;
+				}
+				clearInterval(timer);
+				notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "PONG" } });
+				send({ jsonrpc: "2.0", id, result: { stopReason: "end_turn" } });
+			}, Number(process.env.FAKE_RETRY_STEP_MS ?? 20));
 			continue;
 		}
 		if (scenario === "quota-exhausted") {
@@ -323,6 +417,13 @@ for await (const line of rl) {
 			notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Hello" } });
 			send({ jsonrpc: "2.0", id, result: { stopReason: "end_turn",
 				usage: { inputTokens: 1000, cachedReadTokens: 400, outputTokens: 150, thoughtTokens: 50, totalTokens: 1200 } } });
+			continue;
+		}
+		if (text === "usage single net") {
+			usageUpdate(1200);
+			notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Hello" } });
+			send({ jsonrpc: "2.0", id, result: { stopReason: "end_turn",
+				usage: { inputTokens: 600, cachedReadTokens: 400, outputTokens: 200, thoughtTokens: 50, totalTokens: 1200 } } });
 			continue;
 		}
 		if (!continuing && text.includes("hang")) {
@@ -413,12 +514,13 @@ function sessionConfigOptions() {
 	];
 }
 
-async function invokeMcpTool(server, text) {
+async function invokeMcpTool(server, text, onConnected) {
 	const headers = Object.fromEntries(server.headers.map((header) => [header.name, header.value]));
 	const client = new Client({ name: "fake-gemini", version: "1" }, { capabilities: {} });
 	const transport = new StreamableHTTPClientTransport(new URL(server.url), { requestInit: { headers } });
 	try {
 		await client.connect(transport);
+		onConnected?.();
 		const result = await client.callTool({ name: "pi_echo", arguments: { text } });
 		return result.content.filter((block) => block.type === "text").map((block) => block.text).join("\n");
 	} finally {
