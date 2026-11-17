@@ -1,6 +1,6 @@
 {
 	"name": "omp-antigravity-acp-provider",
-	"version": "0.1.20",
+	"version": "0.1.21",
 	"description": "Google Antigravity ACP provider for Oh My Pi (omp); upstream Pi-compatible",
 	"type": "module",
 	"license": "MIT",
@@ -81,6 +81,7 @@
 		"zod": "4.6.7"
 	},
 	"devDependencies": {
+		"@oh-my-pi/pi-agent-core": "18.8.9",
 		"@oh-my-pi/pi-ai": "18.8.9",
 		"@oh-my-pi/pi-coding-agent": "18.8.9",
 		"@types/node": "24.19.2",

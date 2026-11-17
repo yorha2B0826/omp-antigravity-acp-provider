@@ -1,4 +1,5 @@
-import { retryTransientCompletion, type Context, type TSchema, type Tool } from "@oh-my-pi/pi-ai";
+import { calculateContextTokens, fitOutputTokensToContextWindow, Tokenizer } from "@oh-my-pi/pi-agent-core";
+import { retryTransientCompletion, type Context, type Model, type TSchema, type Tool } from "@oh-my-pi/pi-ai";
 import { isContextOverflow, isProviderRetryableError } from "@oh-my-pi/pi-ai/error";
 import { randomUUID } from "node:crypto";
 import { normalizeContext } from "../src/omp/transcript.js";
@@ -60,6 +61,23 @@ function ompSchema(schema: TypeBoxSchema): TSchema {
 }
 
 const model: AcpModel = { id: "gemini-test", name: "Test", api: "antigravity-acp", provider: "antigravity-acp", baseUrl: "", reasoning: false, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 1000000, maxTokens: 8192 };
+
+// omp has no `estimateContextTokens`/`clampMaxTokensToContext` (upstream Pi's
+// host helpers). The omp equivalents live in pi-agent-core: context accounting
+// reads `Usage.totalTokens` via `calculateContextTokens`, and the next-request
+// output cap comes from `fitOutputTokensToContextWindow` — provider-anchored
+// prompt count + `OUTPUT_FIT_HEADWAY_TOKENS` (64), floored at
+// `MIN_FITTED_OUTPUT_TOKENS` (1024). Every call below anchors on the assistant
+// turn's usage, so this tokenizer never tokenizes (byte fallback is unused).
+const tokenizer = new Tokenizer(null);
+function fitBudget(messages: Context["messages"], contextWindow: number, requested: number): number | undefined {
+	return fitOutputTokensToContextWindow(
+		{ ...model, contextWindow } as unknown as Model,
+		{ messages },
+		requested,
+		tokenizer,
+	);
+}
 const tools: Tool[] = [{ name: "echo", description: "Echo", parameters: ompSchema(Type.Object({ text: Type.String() })) }];
 const roots: string[] = [];
 const runtimes: AntigravityRuntime[] = [];
@@ -153,16 +171,21 @@ describe("permission policy and lifecycle", () => {
 
 describe("context size from usage_update", () => {
 	it.each([
-		["usage multi", false, 1076000, 0],
-		["usage multi cached", false, 356000, 720000],
-		["usage multi cached boundary", false, 1086000, 720000],
-		["usage multi cached overflow", true, 1186000, 720000],
-	] as const)("detects overflow from the latest context, not billed tokens: %s", async (prompt, overflow, input, cacheRead) => {
+		// Last column: omp's fitted output cap — 64-token headway with the
+		// 1024-token floor, so a full/overflowing window gets 1024 where
+		// upstream's clamp returns 1.
+		["usage multi", false, 1076000, 0, 8192],
+		["usage multi cached", false, 356000, 720000, 8192],
+		["usage multi cached boundary", false, 1086000, 720000, 1024],
+		["usage multi cached overflow", true, 1186000, 720000, 1024],
+	] as const)("detects overflow from the latest context, not billed tokens: %s", async (prompt, overflow, input, cacheRead, budget) => {
 		const { runtime } = setup();
 		const message = await turn(runtime, [user(prompt)]);
 		expect(message.stopReason).toBe("stop");
 		expect(isContextOverflow(message, model.contextWindow)).toBe(overflow);
 		expect(message.usage.input + message.usage.cacheRead).toBeLessThanOrEqual(message.usage.totalTokens);
+		expect(calculateContextTokens(message.usage)).toBe(message.usage.totalTokens);
+		expect(fitBudget([message], model.contextWindow, model.maxTokens)).toBe(budget);
 		expect((await runtime.snapshot()).metrics.totals).toMatchObject({ turns: 1, input, cacheRead, output: 4000 });
 	});
 
@@ -194,6 +217,64 @@ describe("context size from usage_update", () => {
 		expect(first.usage).toMatchObject({ input: 600, cacheRead: 400, totalTokens: 1200 });
 		const second = await turn(runtime, [user("usage single"), first, user("usage single", 3)]);
 		expect(second.usage).toMatchObject({ input: 600, cacheRead: 400, totalTokens: 1200 });
+	});
+
+	it.each([
+		["usage single net", 1200],
+		["usage single net drift", 1300],
+	] as const)("does not subtract cache reads without evidence of double-counting: %s", async (prompt, expectedContext) => {
+		const { runtime } = setup();
+		const message = await turn(runtime, [user(prompt)]);
+		expect(message.stopReason).toBe("stop");
+		expect(message.usage).toMatchObject({ input: 600, cacheRead: 400, output: 200, totalTokens: expectedContext });
+	});
+
+	// Captures: https://github.com/zacbemis/pi-antigravity-acp-provider/issues/80#issuecomment-6936679859
+	it.each([
+		["1.5.0", [25814, 26766, 26947],
+			[{ input: 25400, output: 639, reasoning: 516, cacheRead: 13635 },
+				{ input: 7301, output: 457, reasoning: 264, cacheRead: 71480 },
+				{ input: 2307, output: 98, reasoning: 93, cacheRead: 24542 }]],
+		["1.4.3", [46697, 48600, 25630],
+			[{ input: 28360, output: 1158, reasoning: 818, cacheRead: 57059 },
+				{ input: 7185, output: 446, reasoning: 243, cacheRead: 68159 },
+				{ input: 2280, output: 55, reasoning: 50, cacheRead: 23295 }]],
+	] as const)("replays ACP %s captures across three turns without corrupting Pi's budget or billed cost", async (version, contexts, billed) => {
+		const { runtime } = setup();
+		const pricedModel = { ...model, cost: { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 0 } };
+		const messages: Context["messages"] = [];
+		for (const [index, name] of ["warm cache", "multi-step", "single inference"].entries()) {
+			messages.push(user(`usage capture ${version} ${name}`, Date.now()));
+			const message = await drain(runtime.stream(pricedModel, { messages }, { sessionId: "captured-usage", apiKey: "test-key" }));
+			expect(message.stopReason).toBe("stop");
+			const context = contexts[index]!;
+			const counters = billed[index]!;
+			expect(message.usage.totalTokens).toBe(context);
+			expect(message.usage.output).toBe(counters.output);
+			// omp's `Usage` names thinking tokens `reasoningTokens` (a subset of output).
+			expect(message.usage.reasoningTokens).toBe(counters.reasoning);
+			if (index === 2) {
+				expect(message.usage).toMatchObject({ input: counters.input, output: counters.output, cacheRead: counters.cacheRead });
+			} else {
+				// The final inference's cache split is unavailable; old ACP's used is an upper bound.
+				expect(message.usage).toMatchObject({ input: context, cacheRead: 0 });
+			}
+			expect(isContextOverflow(message, model.contextWindow)).toBe(false);
+			expect(message.usage.cost.input).toBeCloseTo(counters.input / 1_000_000, 10);
+			expect(message.usage.cost.output).toBeCloseTo(counters.output * 2 / 1_000_000, 10);
+			expect(message.usage.cost.cacheRead).toBeCloseTo(counters.cacheRead * 0.1 / 1_000_000, 10);
+			messages.push(message);
+			expect(calculateContextTokens(message.usage)).toBe(context);
+			// Exercise omp's actual next-request clamp, including after a model/provider
+			// switch: window − anchored prompt − 64-token headway (upstream reserves 4096,
+			// hence its expected 1000 instead of omp's 5032).
+			expect(fitBudget(messages, context + 4096 + 1000, model.maxTokens)).toBe(4096 + 1000 - 64);
+		}
+		const totals = (await runtime.snapshot()).metrics.totals;
+		expect(totals.turns).toBe(3);
+		for (const key of ["input", "output", "reasoning", "cacheRead"] as const) {
+			expect(totals[key]).toBe(billed.reduce((sum, counters) => sum + counters[key], 0));
+		}
 	});
 
 	it("keeps the prompt response usage when the agent sends no usage_update", async () => {
