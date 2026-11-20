@@ -29,7 +29,7 @@ differences:
 | --- | --- | --- |
 | Host scope | `@earendil-works/pi-ai`, `@earendil-works/pi-coding-agent` | `@oh-my-pi/pi-ai`, `@oh-my-pi/pi-coding-agent` |
 | Provider registration | `pi.registerProvider(provider: Provider)` | `pi.registerProvider(PROVIDER_ID, providerConfig)` |
-| Model catalog | `getModels()` + `refreshModels({ publish })` on a `Provider` object | declarative `models: ProviderModelConfig[]` + async `fetchDynamicModels(apiKey)` |
+| Model catalog | `getModels()` + `refreshModels({ publish, stored })` on a `Provider` object | declarative `models: ProviderModelConfig[]` + async `fetchDynamicModels(apiKey)`; omp's model registry persists the returned catalog in its own SQLite cache and restores it offline, so the Pi-side `persist`/`stored` handshake has no fork-side equivalent |
 | OAuth | `Provider.auth.oauth.login(interaction)` returning `{type:"oauth", …}` | `ProviderConfig.oauth.login(callbacks)` returning `OAuthCredentials`, plus `refreshToken`/`getApiKey` |
 | API-key auth | `auth.apiKey.check/resolve` | `apiKey` field (env/name resolved by omp) with the OAuth login as the primary path |
 | Transcript replay | re-exported from `@earendil-works/pi-ai` | vendored verbatim port in `src/omp/transcript.ts` (from omp's `legacy-pi-transcript.ts`) |
